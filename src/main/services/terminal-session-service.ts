@@ -24,6 +24,10 @@ type PersistedTerminalLayoutItem = {
   createdAt: number
 }
 
+function isDatabaseNotOpenError(error: unknown): boolean {
+  return error instanceof Error && /database is not open/i.test(error.message)
+}
+
 function sanitizeTerminalChunk(chunk: string): string {
   // Strip private-use glyphs (commonly prompt theme icons that render as empty boxes).
   return chunk.replace(/[\uE000-\uF8FF\u{F0000}-\u{FFFFD}\u{100000}-\u{10FFFD}]/gu, '')
@@ -35,6 +39,7 @@ export class TerminalSessionService {
   private readonly sessions = new Map<string, TerminalSession>()
   private readonly listeners = new Set<Listener>()
   private readonly restoredScopes = new Set<string>()
+  private isDisposing = false
 
   constructor(
     private readonly ptyService: PtyProcessService,
@@ -68,6 +73,10 @@ export class TerminalSessionService {
   }
 
   private persistScopeLayout(projectId?: string): void {
+    if (this.isDisposing) {
+      return
+    }
+
     const scoped = this.scopedSessions(projectId)
     const serialized: PersistedTerminalLayoutItem[] = scoped.map((session) => ({
       id: session.id,
@@ -79,7 +88,14 @@ export class TerminalSessionService {
       rows: session.rows,
       createdAt: session.createdAt
     }))
-    this.appSettingsRepository.set(this.toLayoutStorageKey(projectId), JSON.stringify(serialized))
+    try {
+      this.appSettingsRepository.set(this.toLayoutStorageKey(projectId), JSON.stringify(serialized))
+    } catch (error) {
+      if (isDatabaseNotOpenError(error)) {
+        return
+      }
+      throw error
+    }
   }
 
   private readScopeLayout(projectId?: string): PersistedTerminalLayoutItem[] {
@@ -334,9 +350,11 @@ export class TerminalSessionService {
   }
 
   disposeAll(): void {
+    this.isDisposing = true
     for (const session of this.sessions.values()) {
       session.status = 'stopped'
     }
+    this.sessions.clear()
     this.ptyService.disposeAll()
     this.telemetry.setActiveTerminals(0)
   }

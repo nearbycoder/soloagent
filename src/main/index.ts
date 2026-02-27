@@ -35,7 +35,20 @@ const agentService = new AgentOrchestratorService(telemetry, profilesRepository)
 
 let mainWindow: BrowserWindow | null = null
 let ipcRegistered = false
+let hasShutdownServices = false
 const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['https:', 'mailto:'])
+
+function shutdownMainServices(): void {
+  if (hasShutdownServices) {
+    return
+  }
+
+  hasShutdownServices = true
+  terminalService.disposeAll()
+  logger.info('Disposed terminal sessions')
+  sqlite.close()
+  logger.info('SQLite connection closed')
+}
 
 function createApplicationMenu(): Menu {
   const template =
@@ -182,11 +195,11 @@ app.whenReady().then(() => {
   })
 })
 
+app.on('before-quit', () => {
+  shutdownMainServices()
+})
+
 app.on('window-all-closed', () => {
-  terminalService.disposeAll()
-  logger.info('Disposed terminal sessions')
-  sqlite.close()
-  logger.info('SQLite connection closed')
   if (process.platform !== 'darwin') {
     app.quit()
   }
