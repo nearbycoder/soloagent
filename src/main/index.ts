@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, Menu } from 'electron'
+import { app, shell, BrowserWindow, Menu, nativeTheme } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
@@ -15,6 +15,10 @@ import { PtyProcessService } from './services/pty-process-service'
 import { ProjectService } from './services/project-service'
 import { TelemetryService } from './services/telemetry'
 import { TerminalSessionService } from './services/terminal-session-service'
+import {
+  applyWindowBackgroundToAllWindows,
+  resolveWindowBackgroundColor
+} from './utils/window-theme'
 
 const logger = new LoggerService()
 const telemetry = new TelemetryService()
@@ -86,6 +90,11 @@ if (process.platform === 'darwin') {
 }
 
 function createWindow(): void {
+  const themePreference = configService.getThemePreference()
+  const backgroundColor = resolveWindowBackgroundColor(
+    themePreference,
+    nativeTheme.shouldUseDarkColors
+  )
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -94,6 +103,7 @@ function createWindow(): void {
     show: false,
     frame: false,
     autoHideMenuBar: process.platform !== 'darwin',
+    backgroundColor,
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -156,6 +166,13 @@ app.whenReady().then(() => {
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window, { zoom: true })
+  })
+
+  nativeTheme.on('updated', () => {
+    if (configService.getThemePreference() !== 'system') {
+      return
+    }
+    applyWindowBackgroundToAllWindows('system', nativeTheme.shouldUseDarkColors)
   })
 
   createWindow()

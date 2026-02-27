@@ -2,6 +2,10 @@ import { useEffect } from 'react'
 
 export function useSmokeChecks(): void {
   useEffect(() => {
+    if (!import.meta.env.DEV) {
+      return
+    }
+
     if (!window.api) {
       console.warn('Preload API is unavailable; skipping smoke checks.')
       return

@@ -14,13 +14,23 @@ import { useOrchestration } from '@renderer/hooks/use-orchestration'
 import { useSmokeChecks } from '@renderer/hooks/use-smoke-checks'
 import { useOrchestratorStore } from '@renderer/stores/orchestrator-store'
 import { PatchDiff } from '@pierre/diffs/react'
-import type { GitDiffSummary, ProjectRecord, TerminalSession } from '../../../../shared/ipc/types'
+import type {
+  GitDiffFileChange,
+  GitDiffSummary,
+  ProjectRecord,
+  TerminalSession
+} from '../../../../shared/ipc/types'
 import { AssistantChatPanel } from '../chat/assistant-chat-panel'
 import { Button } from '../ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs'
 import { TerminalTabs } from '../terminal/TerminalTabs'
 import { FileTreePanel } from './file-tree-panel'
+import {
+  getAccentTintOverlay,
+  getProjectInitial,
+  normalizeAccentColor
+} from './project-appearance-utils'
 import { useTheme } from './theme-provider'
 import { WindowChrome } from './window-chrome'
 
@@ -110,53 +120,6 @@ function getProjectLogoKey(projectId: string): string {
 
 function getProjectAccentKey(projectId: string): string {
   return `${PROJECT_ACCENT_KEY_PREFIX}${projectId}`
-}
-
-function normalizeAccentColor(value: string): string {
-  const trimmed = value.trim()
-  if (!trimmed) {
-    return ''
-  }
-
-  const withHash = trimmed.startsWith('#') ? trimmed : `#${trimmed}`
-  const shortHex = /^#([0-9a-f]{3})$/i.exec(withHash)
-  if (shortHex) {
-    const [r, g, b] = shortHex[1].split('')
-    return `#${r}${r}${g}${g}${b}${b}`.toLowerCase()
-  }
-
-  return /^#[0-9a-f]{6}$/i.test(withHash) ? withHash.toLowerCase() : ''
-}
-
-function hexToRgb(value: string): { r: number; g: number; b: number } | null {
-  if (!value) {
-    return null
-  }
-  const hex = value.trim().replace('#', '')
-  if (!/^[0-9a-f]{6}$/i.test(hex)) {
-    return null
-  }
-  return {
-    r: Number.parseInt(hex.slice(0, 2), 16),
-    g: Number.parseInt(hex.slice(2, 4), 16),
-    b: Number.parseInt(hex.slice(4, 6), 16)
-  }
-}
-
-function getAccentTintOverlay(color: string, alpha: number): string | undefined {
-  const rgb = hexToRgb(color)
-  if (!rgb) {
-    return undefined
-  }
-  return `linear-gradient(rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha}), rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha}))`
-}
-
-function getProjectInitial(name: string): string {
-  const trimmed = name.trim()
-  if (!trimmed) {
-    return '?'
-  }
-  return trimmed.charAt(0).toUpperCase()
 }
 
 type ProjectAvatarProps = {
@@ -300,6 +263,9 @@ export function DashboardLayout(): React.JSX.Element {
   const [gitDiffLoading, setGitDiffLoading] = useState(false)
   const [gitDiffError, setGitDiffError] = useState('')
   const [expandedGitDiffFiles, setExpandedGitDiffFiles] = useState<Record<string, boolean>>({})
+  const [gitDiffPatchLoadingByPath, setGitDiffPatchLoadingByPath] = useState<
+    Record<string, boolean>
+  >({})
   const [gitDiffModalFileIndex, setGitDiffModalFileIndex] = useState<number | null>(null)
   const [rightSidebarTab, setRightSidebarTab] = useState<RightSidebarTab>('git-diff')
   const [chatStreamingByScope, setChatStreamingByScope] = useState<ChatStreamingByScope>({})
@@ -438,6 +404,7 @@ export function DashboardLayout(): React.JSX.Element {
       setGitDiff(null)
       setGitDiffError('')
       setGitDiffLoading(false)
+      setGitDiffPatchLoadingByPath({})
       return
     }
 
@@ -447,12 +414,14 @@ export function DashboardLayout(): React.JSX.Element {
       setGitDiff(null)
       setGitDiffError(response.error.message || 'Unable to load git diff.')
       setGitDiffLoading(false)
+      setGitDiffPatchLoadingByPath({})
       return
     }
 
     setGitDiff(response.data)
     setGitDiffError('')
     setGitDiffLoading(false)
+    setGitDiffPatchLoadingByPath({})
   }, [selectedProject?.rootPath])
 
   const diffTheme = resolvedTheme === 'dark' ? 'github-dark' : 'github-light'
@@ -487,26 +456,141 @@ export function DashboardLayout(): React.JSX.Element {
     [selectedProject?.id]
   )
 
+  const applyGitDiffFilePatch = useCallback((patchedFile: GitDiffFileChange): void => {
+    setGitDiff((current) => {
+      if (!current) {
+        return current
+      }
+
+      let changed = false
+      const nextFiles = current.files.map((file) => {
+        if (file.path !== patchedFile.path) {
+          return file
+        }
+
+        changed = true
+        return {
+          ...file,
+          additions:
+            file.additions === 0 && file.deletions === 0 ? patchedFile.additions : file.additions,
+          deletions:
+            file.additions === 0 && file.deletions === 0 ? patchedFile.deletions : file.deletions,
+          hunks: patchedFile.hunks.length > 0 ? patchedFile.hunks : file.hunks,
+          patch: patchedFile.patch
+        }
+      })
+
+      if (!changed) {
+        return current
+      }
+
+      const totalAdditions = nextFiles.reduce((sum, file) => sum + file.additions, 0)
+      const totalDeletions = nextFiles.reduce((sum, file) => sum + file.deletions, 0)
+
+      return {
+        ...current,
+        files: nextFiles,
+        totalAdditions,
+        totalDeletions
+      }
+    })
+  }, [])
+
+  const ensureGitDiffPatch = useCallback(
+    async (path: string): Promise<boolean> => {
+      if (!window.api) {
+        return false
+      }
+
+      const cwd = selectedProject?.rootPath
+      if (!cwd) {
+        return false
+      }
+
+      const existingFile = gitDiffFiles.find((file) => file.path === path)
+      if (!existingFile) {
+        return false
+      }
+
+      if (existingFile.patch && existingFile.patch.trim().length > 0) {
+        return true
+      }
+
+      const fileKey = getDiffFileKey(path)
+      if (gitDiffPatchLoadingByPath[fileKey]) {
+        return false
+      }
+
+      setGitDiffPatchLoadingByPath((state) => ({
+        ...state,
+        [fileKey]: true
+      }))
+
+      try {
+        const response = await window.api.app.gitDiffFilePatch({
+          cwd,
+          path,
+          status: existingFile.status
+        })
+        if (!response.ok) {
+          setActionStatus(response.error.message || 'Unable to load file diff.')
+          return false
+        }
+
+        applyGitDiffFilePatch({
+          ...existingFile,
+          additions: response.data.additions,
+          deletions: response.data.deletions,
+          hunks: response.data.hunks,
+          patch: response.data.patch
+        })
+
+        return Boolean(response.data.patch && response.data.patch.trim().length > 0)
+      } finally {
+        setGitDiffPatchLoadingByPath((state) => {
+          const next = { ...state }
+          delete next[fileKey]
+          return next
+        })
+      }
+    },
+    [
+      applyGitDiffFilePatch,
+      getDiffFileKey,
+      gitDiffFiles,
+      gitDiffPatchLoadingByPath,
+      selectedProject?.rootPath
+    ]
+  )
+
   const toggleGitDiffFile = useCallback(
-    (path: string): void => {
+    async (path: string): Promise<void> => {
+      const hasPatch = await ensureGitDiffPatch(path)
+      if (!hasPatch) {
+        return
+      }
       const key = getDiffFileKey(path)
       setExpandedGitDiffFiles((state) => ({
         ...state,
         [key]: !state[key]
       }))
     },
-    [getDiffFileKey]
+    [ensureGitDiffPatch, getDiffFileKey]
   )
 
   const openGitDiffModal = useCallback(
-    (path: string): void => {
+    async (path: string): Promise<void> => {
+      const hasPatch = await ensureGitDiffPatch(path)
+      if (!hasPatch) {
+        return
+      }
       const fileIndex = gitDiffFiles.findIndex((file) => file.path === path)
       if (fileIndex < 0) {
         return
       }
       setGitDiffModalFileIndex(fileIndex)
     },
-    [gitDiffFiles]
+    [ensureGitDiffPatch, gitDiffFiles]
   )
 
   const closeGitDiffModal = useCallback((): void => {
@@ -543,11 +627,12 @@ export function DashboardLayout(): React.JSX.Element {
     if (!window.api) return
     void (async () => {
       try {
-        const [projectsResponse, currentProjectResponse, homeVisibilityResponse] = await Promise.all([
-          window.api.project.list(),
-          window.api.project.current(),
-          window.api.config.get(HOME_VISIBILITY_CONFIG_KEY)
-        ])
+        const [projectsResponse, currentProjectResponse, homeVisibilityResponse] =
+          await Promise.all([
+            window.api.project.list(),
+            window.api.project.current(),
+            window.api.config.get(HOME_VISIBILITY_CONFIG_KEY)
+          ])
 
         const listedProjects = projectsResponse.ok ? projectsResponse.data : []
         if (projectsResponse.ok) {
@@ -604,7 +689,10 @@ export function DashboardLayout(): React.JSX.Element {
         return
       }
 
-      const validProjectIds = new Set([HOME_PROJECT_SCOPE, ...projects.map((project) => project.id)])
+      const validProjectIds = new Set([
+        HOME_PROJECT_SCOPE,
+        ...projects.map((project) => project.id)
+      ])
       const nextProjectLogosById: Record<string, string> = {}
       const nextProjectAccentColorsById: Record<string, string> = {}
       for (const setting of response.data) {
@@ -638,10 +726,6 @@ export function DashboardLayout(): React.JSX.Element {
       cancelled = true
     }
   }, [projects])
-
-  useEffect(() => {
-    void loadGitDiff()
-  }, [loadGitDiff])
 
   useEffect(() => {
     if (!gitDiff) {
@@ -709,18 +793,22 @@ export function DashboardLayout(): React.JSX.Element {
   }, [closeGitDiffModal, gitDiffModalOpen, showNextDiffFile, showPreviousDiffFile])
 
   useEffect(() => {
-    if (!selectedProject?.rootPath || rightCollapsed) {
+    if (!selectedProject?.rootPath || rightCollapsed || rightSidebarTab !== 'git-diff') {
       return
     }
 
+    const initialTimer = window.setTimeout(() => {
+      void loadGitDiff()
+    }, 140)
     const timer = window.setInterval(() => {
       void loadGitDiff()
-    }, 3000)
+    }, 4000)
 
     return () => {
+      window.clearTimeout(initialTimer)
       window.clearInterval(timer)
     }
-  }, [loadGitDiff, rightCollapsed, selectedProject?.rootPath])
+  }, [loadGitDiff, rightCollapsed, rightSidebarTab, selectedProject?.rootPath])
 
   useEffect(() => {
     if (!window.api) return
@@ -2076,62 +2164,62 @@ export function DashboardLayout(): React.JSX.Element {
                   }
             }
           >
-          <Card className="min-h-0 flex flex-col overflow-hidden">
-            <CardContent className="min-h-0 flex-1 p-2">
-              {noProjectAvailable ? (
-                <NoProjectPlaceholder
-                  title="No Project Selected"
-                  description="Add a project to start chatting in a workspace."
-                  onAddProject={() => void addProject()}
-                />
-              ) : (
-                <AssistantChatPanel
-                  activeScopeKey={projectScopeKey}
-                  activeSpaceId={activeSpaceId}
-                  sessions={chatSessions}
-                  colorMode={resolvedTheme}
-                  onStreamingChange={handleChatStreamingChange}
-                />
-              )}
-            </CardContent>
-          </Card>
-
-          {!terminalPanelCollapsed ? (
-            <div
-              role="separator"
-              aria-orientation="horizontal"
-              aria-label="Resize chat and terminal panels"
-              onPointerDown={startCenterResize}
-              className={`rounded-sm border border-border/70 bg-muted/60 transition-colors ${
-                isResizingCenter ? 'bg-accent' : 'hover:bg-accent/70'
-              } cursor-row-resize`}
-            />
-          ) : null}
-
-          {!terminalPanelCollapsed ? (
             <Card className="min-h-0 flex flex-col overflow-hidden">
-              <CardContent className="min-h-0 flex-1 overflow-hidden p-2">
+              <CardContent className="min-h-0 flex-1 p-2">
                 {noProjectAvailable ? (
                   <NoProjectPlaceholder
-                    title="No Terminal Workspace"
-                    description="Add a project to open terminals and run commands."
+                    title="No Project Selected"
+                    description="Add a project to start chatting in a workspace."
                     onAddProject={() => void addProject()}
                   />
                 ) : (
-                  <TerminalTabs
-                    terminals={terminalsInActiveSpace}
-                    activeTerminalId={activeTerminal?.id}
+                  <AssistantChatPanel
+                    activeScopeKey={projectScopeKey}
+                    activeSpaceId={activeSpaceId}
+                    sessions={chatSessions}
                     colorMode={resolvedTheme}
-                    onActiveTerminalChange={setActiveTerminal}
-                    onCreateTab={handleCreateTab}
-                    onCreateSplit={handleCreateSplit}
-                    onCloseTerminal={handleCloseTerminalRequest}
-                    onRenameTerminal={handleRenameTerminalRequest}
+                    onStreamingChange={handleChatStreamingChange}
                   />
                 )}
               </CardContent>
             </Card>
-          ) : null}
+
+            {!terminalPanelCollapsed ? (
+              <div
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label="Resize chat and terminal panels"
+                onPointerDown={startCenterResize}
+                className={`rounded-sm border border-border/70 bg-muted/60 transition-colors ${
+                  isResizingCenter ? 'bg-accent' : 'hover:bg-accent/70'
+                } cursor-row-resize`}
+              />
+            ) : null}
+
+            {!terminalPanelCollapsed ? (
+              <Card className="min-h-0 flex flex-col overflow-hidden">
+                <CardContent className="min-h-0 flex-1 overflow-hidden p-2">
+                  {noProjectAvailable ? (
+                    <NoProjectPlaceholder
+                      title="No Terminal Workspace"
+                      description="Add a project to open terminals and run commands."
+                      onAddProject={() => void addProject()}
+                    />
+                  ) : (
+                    <TerminalTabs
+                      terminals={terminalsInActiveSpace}
+                      activeTerminalId={activeTerminal?.id}
+                      colorMode={resolvedTheme}
+                      onActiveTerminalChange={setActiveTerminal}
+                      onCreateTab={handleCreateTab}
+                      onCreateSplit={handleCreateSplit}
+                      onCloseTerminal={handleCloseTerminalRequest}
+                      onRenameTerminal={handleRenameTerminalRequest}
+                    />
+                  )}
+                </CardContent>
+              </Card>
+            ) : null}
           </div>
         ) : null}
 
@@ -2150,16 +2238,16 @@ export function DashboardLayout(): React.JSX.Element {
                   onValueChange={(value) => setRightSidebarTab(value as RightSidebarTab)}
                   className="flex h-full min-h-0 flex-col"
                 >
-                  <TabsList className="grid h-8 w-full grid-cols-2 rounded-md bg-muted/80 p-0.5">
+                  <TabsList className="grid h-7 w-full grid-cols-2 rounded-md bg-muted/80 p-0.5">
                     <TabsTrigger
                       value="git-diff"
-                      className="h-6 rounded-sm text-[11px] data-[state=active]:shadow-sm"
+                      className="h-full w-full rounded-sm px-2 text-[11px] data-[state=active]:shadow-sm"
                     >
                       Git Diff
                     </TabsTrigger>
                     <TabsTrigger
                       value="file-tree"
-                      className="h-6 rounded-sm text-[11px] data-[state=active]:shadow-sm"
+                      className="h-full w-full rounded-sm px-2 text-[11px] data-[state=active]:shadow-sm"
                     >
                       File Tree
                     </TabsTrigger>
@@ -2210,7 +2298,10 @@ export function DashboardLayout(): React.JSX.Element {
                             {gitDiffFiles.map((file) => {
                               const diffFileKey = getDiffFileKey(file.path)
                               const expanded = expandedGitDiffFiles[diffFileKey] || false
+                              const isPatchLoading = Boolean(gitDiffPatchLoadingByPath[diffFileKey])
                               const hasPatch = Boolean(file.patch && file.patch.trim().length > 0)
+                              const canLoadPatch = Boolean(selectedProject?.rootPath)
+                              const canOpenPatch = hasPatch || canLoadPatch
 
                               return (
                                 <div
@@ -2240,22 +2331,24 @@ export function DashboardLayout(): React.JSX.Element {
                                       <button
                                         type="button"
                                         className="rounded-sm border border-border/70 px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                                        onClick={() => openGitDiffModal(file.path)}
-                                        disabled={!hasPatch}
+                                        onClick={() => void openGitDiffModal(file.path)}
+                                        disabled={!canOpenPatch || isPatchLoading}
                                       >
-                                        Full
+                                        {isPatchLoading ? 'Loading...' : 'Full'}
                                       </button>
                                       <button
                                         type="button"
                                         className="rounded-sm border border-border/70 px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                                        onClick={() => toggleGitDiffFile(file.path)}
-                                        disabled={!hasPatch}
+                                        onClick={() => void toggleGitDiffFile(file.path)}
+                                        disabled={!canOpenPatch || isPatchLoading}
                                       >
-                                        {hasPatch
-                                          ? expanded
-                                            ? 'Hide Diff'
-                                            : 'Show Diff'
-                                          : 'No Patch'}
+                                        {isPatchLoading
+                                          ? 'Loading...'
+                                          : hasPatch
+                                            ? expanded
+                                              ? 'Hide Diff'
+                                              : 'Show Diff'
+                                            : 'Load Diff'}
                                       </button>
                                     </div>
                                   </div>
@@ -2581,7 +2674,20 @@ export function DashboardLayout(): React.JSX.Element {
                 </div>
               ) : (
                 <div className="rounded-md border border-border/70 bg-muted/40 p-2 text-xs text-muted-foreground">
-                  No patch content available for this file.
+                  <div>No patch content loaded for this file.</div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="mt-2 h-7"
+                    onClick={() => void ensureGitDiffPatch(gitDiffModalFile.path)}
+                    disabled={Boolean(
+                      gitDiffPatchLoadingByPath[getDiffFileKey(gitDiffModalFile.path)]
+                    )}
+                  >
+                    {gitDiffPatchLoadingByPath[getDiffFileKey(gitDiffModalFile.path)]
+                      ? 'Loading...'
+                      : 'Load Diff'}
+                  </Button>
                 </div>
               )}
             </div>

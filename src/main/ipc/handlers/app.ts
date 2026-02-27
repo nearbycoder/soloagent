@@ -7,6 +7,7 @@ import { ipcChannels } from '../../../shared/ipc/channels'
 import type {
   FileReadResult,
   FileTreeEntry,
+  GitDiffFilePatchResult,
   GitDiffFileChange,
   GitDiffHunk,
   GitDiffSummary
@@ -16,6 +17,11 @@ import type { IpcContext } from '../context'
 
 const gitDiffInputSchema = z.object({
   cwd: z.string().trim().min(1)
+})
+const gitDiffFilePatchInputSchema = z.object({
+  cwd: z.string().trim().min(1),
+  path: z.string().trim().min(1),
+  status: z.string().trim().optional()
 })
 const fileTreeInputSchema = z.object({
   cwd: z.string().trim().min(1),
@@ -46,6 +52,8 @@ type MutableGitDiffFileChange = GitDiffFileChange & {
   patch?: string
 }
 
+type FileTreeGitStatus = NonNullable<FileTreeEntry['gitStatus']>
+
 function runGit(cwd: string, args: string[]): string {
   try {
     return execFileSync('git', args, {
@@ -68,6 +76,39 @@ function runGitOptional(cwd: string, args: string[]): string {
     return runGit(cwd, args)
   } catch {
     return ''
+  }
+}
+
+function runGitAllowingStatus(cwd: string, args: string[], allowedStatuses: number[]): string {
+  try {
+    return execFileSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 16 * 1024 * 1024
+    })
+  } catch (error) {
+    const maybeError = error as {
+      status?: number
+      stdout?: string | Buffer
+      message?: string
+    }
+
+    if (typeof maybeError.status === 'number' && allowedStatuses.includes(maybeError.status)) {
+      if (typeof maybeError.stdout === 'string') {
+        return maybeError.stdout
+      }
+      if (Buffer.isBuffer(maybeError.stdout)) {
+        return maybeError.stdout.toString('utf8')
+      }
+      return ''
+    }
+
+    const message =
+      error instanceof Error && error.message
+        ? error.message
+        : 'Git command failed for the selected project.'
+    throw new Error(message)
   }
 }
 
@@ -159,6 +200,108 @@ function parseStatusOutput(
       ? rawPath.split(' -> ').at(-1)?.trim() || rawPath
       : rawPath
     ensureFile(filesByPath, path, normalizeStatus(code))
+  }
+}
+
+function toFileTreeGitStatus(value: string): FileTreeGitStatus | undefined {
+  if (
+    value === 'modified' ||
+    value === 'added' ||
+    value === 'deleted' ||
+    value === 'renamed' ||
+    value === 'copied' ||
+    value === 'typechange' ||
+    value === 'conflict' ||
+    value === 'untracked'
+  ) {
+    return value
+  }
+  return undefined
+}
+
+function getWorkingTreeStatusByPath(cwd: string): Map<string, FileTreeGitStatus> {
+  const statusOutput = runGitOptional(cwd, ['status', '--porcelain=v1', '--untracked-files=all'])
+  const statusByPath = new Map<string, FileTreeGitStatus>()
+
+  const lines = statusOutput.split('\n').map((line) => line.trimEnd())
+  for (const line of lines) {
+    if (!line || line.startsWith('## ')) {
+      continue
+    }
+
+    const code = line.slice(0, 2)
+    if (code === '!!') {
+      continue
+    }
+
+    const rawPath = line.slice(3).trim()
+    if (!rawPath) {
+      continue
+    }
+
+    const normalizedPath = (
+      rawPath.includes(' -> ') ? rawPath.split(' -> ').at(-1)?.trim() || rawPath : rawPath
+    ).replace(/\\/g, '/')
+
+    const status = toFileTreeGitStatus(normalizeStatus(code))
+    if (!status) {
+      continue
+    }
+
+    statusByPath.set(normalizedPath, status)
+  }
+
+  return statusByPath
+}
+
+function normalizeNameStatusCode(code: string): string {
+  if (code.startsWith('R')) return 'renamed'
+  if (code.startsWith('C')) return 'copied'
+  if (code.startsWith('A')) return 'added'
+  if (code.startsWith('D')) return 'deleted'
+  if (code.startsWith('T')) return 'typechange'
+  if (code.startsWith('U')) return 'conflict'
+  if (code.startsWith('M')) return 'modified'
+  return 'modified'
+}
+
+function parseNameStatusOutput(
+  output: string,
+  filesByPath: Map<string, MutableGitDiffFileChange>
+): void {
+  const lines = output.split('\n')
+  for (const line of lines) {
+    if (!line.trim()) {
+      continue
+    }
+
+    const [rawCode, firstPath, secondPath] = line.split('\t')
+    const code = rawCode?.trim()
+    if (!code) {
+      continue
+    }
+
+    // Rename/copy lines include both old and new paths; we list the destination path.
+    const path = (secondPath || firstPath || '').trim()
+    if (!path) {
+      continue
+    }
+
+    ensureFile(filesByPath, path, normalizeNameStatusCode(code))
+  }
+}
+
+function parseUntrackedFilesOutput(
+  output: string,
+  filesByPath: Map<string, MutableGitDiffFileChange>
+): void {
+  const lines = output.split('\n')
+  for (const line of lines) {
+    const path = line.trim()
+    if (!path) {
+      continue
+    }
+    ensureFile(filesByPath, path, 'untracked')
   }
 }
 
@@ -256,13 +399,39 @@ function parseDiffPatches(
   }
 }
 
+function summarizePatchLineChanges(patch: string): { additions: number; deletions: number } {
+  let additions = 0
+  let deletions = 0
+  const lines = patch.split('\n')
+  for (const line of lines) {
+    if (line.startsWith('+++') || line.startsWith('---')) {
+      continue
+    }
+    if (line.startsWith('+')) {
+      additions += 1
+      continue
+    }
+    if (line.startsWith('-')) {
+      deletions += 1
+    }
+  }
+
+  return { additions, deletions }
+}
+
 function buildGitDiffSummary(cwd: string): GitDiffSummary {
-  const statusOutput = runGit(cwd, ['status', '--porcelain=v1', '--branch'])
+  const statusOutput = runGit(cwd, [
+    'status',
+    '--porcelain=v1',
+    '--branch',
+    '--untracked-files=all'
+  ])
+  const trackedNameStatus = runGitOptional(cwd, ['diff', '--name-status', 'HEAD'])
+  const untrackedFiles = runGitOptional(cwd, ['ls-files', '--others', '--exclude-standard'])
   const numstatUnstaged = runGit(cwd, ['diff', '--numstat'])
   const numstatStaged = runGit(cwd, ['diff', '--cached', '--numstat'])
   const hunksUnstaged = runGit(cwd, ['diff', '--unified=0', '--no-color'])
   const hunksStaged = runGit(cwd, ['diff', '--cached', '--unified=0', '--no-color'])
-  const fullPatch = runGitOptional(cwd, ['diff', 'HEAD', '--unified=3', '--no-color'])
 
   const filesByPath = new Map<string, MutableGitDiffFileChange>()
   const branchLine = statusOutput
@@ -272,11 +441,12 @@ function buildGitDiffSummary(cwd: string): GitDiffSummary {
   const { branch, ahead, behind } = parseBranchStatus(branchLine)
 
   parseStatusOutput(statusOutput, filesByPath)
+  parseNameStatusOutput(trackedNameStatus, filesByPath)
+  parseUntrackedFilesOutput(untrackedFiles, filesByPath)
   parseNumstatOutput(numstatUnstaged, filesByPath)
   parseNumstatOutput(numstatStaged, filesByPath)
   parseDiffHunks(hunksUnstaged, filesByPath)
   parseDiffHunks(hunksStaged, filesByPath)
-  parseDiffPatches(fullPatch, filesByPath)
 
   const files = [...filesByPath.values()].sort((left, right) => left.path.localeCompare(right.path))
   const totalAdditions = files.reduce((sum, file) => sum + file.additions, 0)
@@ -291,6 +461,54 @@ function buildGitDiffSummary(cwd: string): GitDiffSummary {
     totalAdditions,
     totalDeletions,
     clean: files.length === 0
+  }
+}
+
+function buildGitDiffFilePatch(cwd: string, path: string, status?: string): GitDiffFilePatchResult {
+  const normalizedPath = normalizeRelativePath(path)
+  if (!normalizedPath) {
+    throw new Error('Invalid diff file path.')
+  }
+
+  const patch =
+    status === 'untracked'
+      ? runGitAllowingStatus(
+          cwd,
+          ['diff', '--no-index', '--no-color', '--unified=3', '--', '/dev/null', normalizedPath],
+          [1]
+        ).trimEnd()
+      : runGitOptional(cwd, [
+          'diff',
+          'HEAD',
+          '--no-color',
+          '--unified=3',
+          '--',
+          normalizedPath
+        ]).trimEnd()
+
+  if (!patch) {
+    return {
+      path: normalizedPath,
+      additions: 0,
+      deletions: 0,
+      hunks: [],
+      patch: undefined
+    }
+  }
+
+  const parsed = new Map<string, MutableGitDiffFileChange>()
+  parseDiffHunks(patch, parsed)
+  parseDiffPatches(patch, parsed)
+
+  const parsedEntry = parsed.get(normalizedPath)
+  const { additions, deletions } = summarizePatchLineChanges(patch)
+
+  return {
+    path: normalizedPath,
+    additions,
+    deletions,
+    hunks: parsedEntry?.hunks || [],
+    patch: parsedEntry?.patch || patch
   }
 }
 
@@ -401,6 +619,7 @@ async function searchFileTreeEntries(
   limit: number
 ): Promise<FileTreeEntry[]> {
   const normalizedQuery = query.toLowerCase()
+  const workingTreeStatusByPath = getWorkingTreeStatusByPath(cwd)
   const results: FileTreeEntry[] = []
   const queue: string[] = ['']
   let scannedDirectories = 0
@@ -446,7 +665,10 @@ async function searchFileTreeEntries(
         continue
       }
 
-      results.push(entry)
+      results.push({
+        ...entry,
+        gitStatus: workingTreeStatusByPath.get(entry.path)
+      })
 
       if (results.length >= limit) {
         break
@@ -460,6 +682,7 @@ async function searchFileTreeEntries(
 async function listFileTreeEntries(cwd: string, relativePath: string): Promise<FileTreeEntry[]> {
   const normalizedRelativePath = normalizeRelativePath(relativePath)
   const directoryPath = resolveDirectoryInRoot(cwd, normalizedRelativePath)
+  const workingTreeStatusByPath = getWorkingTreeStatusByPath(cwd)
   const entries = await readdir(directoryPath, { withFileTypes: true })
 
   return filterGitIgnoredFileTreeEntries(
@@ -470,11 +693,13 @@ async function listFileTreeEntries(cwd: string, relativePath: string): Promise<F
         const childPath = normalizedRelativePath
           ? `${normalizedRelativePath}/${entry.name}`
           : entry.name
+        const normalizedPath = childPath.replace(/\\/g, '/')
         const type: FileTreeEntry['type'] = entry.isDirectory() ? 'directory' : 'file'
         return {
           name: entry.name,
-          path: childPath.replace(/\\/g, '/'),
-          type
+          path: normalizedPath,
+          type,
+          gitStatus: type === 'file' ? workingTreeStatusByPath.get(normalizedPath) : undefined
         }
       })
   ).sort((left, right) => {
@@ -543,6 +768,12 @@ export function registerAppHandlers(context: IpcContext): void {
     safeInvoke(() => {
       const input = gitDiffInputSchema.parse(rawInput)
       return buildGitDiffSummary(input.cwd)
+    })
+  )
+  ipcMain.handle(ipcChannels.app.gitDiffFilePatch, (_, rawInput) =>
+    safeInvoke(() => {
+      const input = gitDiffFilePatchInputSchema.parse(rawInput)
+      return buildGitDiffFilePatch(input.cwd, input.path, input.status)
     })
   )
   ipcMain.handle(ipcChannels.app.fileTree, (_, rawInput) =>

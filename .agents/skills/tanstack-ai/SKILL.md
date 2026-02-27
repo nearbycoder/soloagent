@@ -3,7 +3,6 @@ name: tanstack-ai
 description: Provider-agnostic, type-safe AI SDK for streaming, tool calling, structured output, and multimodal content.
 ---
 
-
 ## Overview
 
 TanStack AI is a modular, provider-agnostic AI SDK with tree-shakeable adapters for OpenAI, Anthropic, Gemini, Ollama, and more. It provides streaming-first text generation, tool calling with approval workflows, structured output with Zod schemas, multimodal content support, and React hooks for chat/completion UIs.
@@ -51,8 +50,8 @@ const result = await generate({
   adapter: openaiText({ model: 'gpt-4o' }),
   messages: [
     { role: 'system', content: 'You are a helpful assistant.' },
-    { role: 'user', content: 'Explain React hooks in 3 sentences.' },
-  ],
+    { role: 'user', content: 'Explain React hooks in 3 sentences.' }
+  ]
 })
 
 // Streaming with async iteration
@@ -94,7 +93,7 @@ import { useChat } from '@tanstack/ai-react'
 
 function ChatUI() {
   const { messages, input, setInput, handleSubmit, isLoading } = useChat({
-    adapter: openaiText({ model: 'gpt-4o' }),
+    adapter: openaiText({ model: 'gpt-4o' })
   })
 
   return (
@@ -126,7 +125,7 @@ import { useCompletion } from '@tanstack/ai-react'
 
 function CompletionUI() {
   const { completion, input, setInput, handleSubmit, isLoading } = useCompletion({
-    adapter: openaiText({ model: 'gpt-4o' }),
+    adapter: openaiText({ model: 'gpt-4o' })
   })
 
   return (
@@ -137,7 +136,9 @@ function CompletionUI() {
           onChange={(e) => setInput(e.target.value)}
           placeholder="Enter prompt..."
         />
-        <button type="submit" disabled={isLoading}>Generate</button>
+        <button type="submit" disabled={isLoading}>
+          Generate
+        </button>
       </form>
       {completion && <div>{completion}</div>}
     </div>
@@ -152,7 +153,7 @@ import { createChat } from '@tanstack/ai-solid'
 
 function ChatUI() {
   const chat = createChat({
-    adapter: openaiText({ model: 'gpt-4o' }),
+    adapter: openaiText({ model: 'gpt-4o' })
   })
 
   return (
@@ -188,7 +189,7 @@ import { createAIClient } from '@tanstack/ai-client'
 import { openaiText } from '@tanstack/ai-openai/adapters'
 
 const client = createAIClient({
-  adapter: openaiText({ model: 'gpt-4o' }),
+  adapter: openaiText({ model: 'gpt-4o' })
 })
 
 // Subscribe to state changes
@@ -225,6 +226,7 @@ for await (const chunk of result) {
 ```
 
 Available streaming strategies:
+
 - **Batch** - Collect all chunks before delivery
 - **Punctuation** - Stream at sentence boundaries
 - **WordBoundary** - Stream at word boundaries
@@ -239,11 +241,11 @@ import { createReplayStream } from '@tanstack/ai'
 export async function handler(req: Request) {
   const stream = createReplayStream({
     adapter: openaiText({ model: 'gpt-4o' }),
-    messages: await req.json(),
+    messages: await req.json()
   })
 
   return new Response(stream, {
-    headers: { 'Content-Type': 'text/event-stream' },
+    headers: { 'Content-Type': 'text/event-stream' }
   })
 }
 ```
@@ -257,18 +259,20 @@ import { z } from 'zod'
 
 const RecipeSchema = z.object({
   name: z.string(),
-  ingredients: z.array(z.object({
-    item: z.string(),
-    amount: z.string(),
-  })),
+  ingredients: z.array(
+    z.object({
+      item: z.string(),
+      amount: z.string()
+    })
+  ),
   steps: z.array(z.string()),
-  cookTime: z.number(),
+  cookTime: z.number()
 })
 
 const result = await generate({
   adapter: openaiText({ model: 'gpt-4o' }),
   messages: [{ role: 'user', content: 'Give me a pasta recipe' }],
-  schema: convertZodToJsonSchema(RecipeSchema),
+  schema: convertZodToJsonSchema(RecipeSchema)
 })
 
 // result is typed as z.infer<typeof RecipeSchema>
@@ -290,14 +294,14 @@ const result = await generate({
       description: 'Get weather for a location',
       parameters: z.object({
         location: z.string(),
-        unit: z.enum(['celsius', 'fahrenheit']).optional(),
+        unit: z.enum(['celsius', 'fahrenheit']).optional()
       }),
       execute: async ({ location, unit }) => {
         const data = await fetchWeather(location, unit)
         return data
-      },
-    },
-  },
+      }
+    }
+  }
 })
 ```
 
@@ -315,13 +319,13 @@ const manager = new ToolCallManager({
       execute: async ({ userId }) => {
         await deleteUser(userId)
         return { success: true }
-      },
-    },
+      }
+    }
   },
   onApprovalRequired: async (toolCall) => {
     // Present to user for approval
     return await showApprovalDialog(toolCall)
-  },
+  }
 })
 ```
 
@@ -332,7 +336,7 @@ const result = await generate({
   adapter: openaiText({ model: 'gpt-4o' }),
   messages: [{ role: 'user', content: 'Research and summarize the topic' }],
   tools: { search, summarize, writeReport },
-  maxIterations: 10, // Limit agent loop iterations
+  maxIterations: 10 // Limit agent loop iterations
 })
 ```
 
@@ -342,13 +346,15 @@ const result = await generate({
 // Images
 const result = await generate({
   adapter: openaiText({ model: 'gpt-4o' }),
-  messages: [{
-    role: 'user',
-    content: [
-      { type: 'text', text: 'What is in this image?' },
-      { type: 'image_url', image_url: { url: 'https://example.com/photo.jpg' } },
-    ],
-  }],
+  messages: [
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'What is in this image?' },
+        { type: 'image_url', image_url: { url: 'https://example.com/photo.jpg' } }
+      ]
+    }
+  ]
 })
 
 // Image generation with DALL-E
@@ -356,7 +362,7 @@ import { openaiImage } from '@tanstack/ai-openai/adapters'
 
 const image = await generate({
   adapter: openaiImage({ model: 'dall-e-3' }),
-  messages: [{ role: 'user', content: 'A sunset over mountains' }],
+  messages: [{ role: 'user', content: 'A sunset over mountains' }]
 })
 
 // Image generation with Gemini Imagen
@@ -364,7 +370,7 @@ import { geminiImage } from '@tanstack/ai-gemini/adapters'
 
 const image = await generate({
   adapter: geminiImage({ model: 'imagen-3' }),
-  messages: [{ role: 'user', content: 'A futuristic cityscape at night' }],
+  messages: [{ role: 'user', content: 'A futuristic cityscape at night' }]
 })
 ```
 
@@ -381,8 +387,8 @@ const result = await generate({
   messages: [{ role: 'user', content: 'Solve this complex math problem step by step...' }],
   thinking: {
     enabled: true,
-    budget: 10000, // Max thinking tokens
-  },
+    budget: 10000 // Max thinking tokens
+  }
 })
 
 // Access thinking/reasoning output
@@ -449,8 +455,8 @@ function App() {
         {
           id: 'ai',
           name: 'AI',
-          render: () => <AIDevtoolsPanel />,
-        },
+          render: () => <AIDevtoolsPanel />
+        }
       ]}
     />
   )
@@ -458,6 +464,7 @@ function App() {
 ```
 
 AI Devtools features:
+
 - **Message Inspector** - View full conversation history with metadata
 - **Token Usage** - Track input/output tokens and costs per request
 - **Streaming Visualization** - Real-time view of streaming chunks
@@ -478,7 +485,7 @@ const aiChat = createServerFn({ method: 'POST' })
   .handler(async ({ data }) => {
     const result = await generate({
       adapter: openaiText({ model: 'gpt-4o' }),
-      messages: data.messages,
+      messages: data.messages
     })
     return result
   })

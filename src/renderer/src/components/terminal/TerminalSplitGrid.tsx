@@ -26,10 +26,7 @@ export function TerminalSplitGrid({
     <div className={`grid h-full min-h-0 gap-2 ${columns}`}>
       {visible.map((terminal) => (
         <div key={terminal.id} className="min-h-0">
-          <TerminalView
-            terminalId={terminal.id}
-            colorMode={colorMode}
-          />
+          <TerminalView terminalId={terminal.id} colorMode={colorMode} />
         </div>
       ))}
     </div>

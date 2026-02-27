@@ -1016,44 +1016,41 @@ function AssistantChatSession({
       payload: buildToolTracePayload(liveToolCalls)
     }
   }, [hasPersistedToolTraceForActiveRun, hasToolTraceAfterLatestUser, isLoading, liveToolCalls])
-  const renderItems = useMemo<ChatRenderItem[]>(
-    () => {
-      if (!liveToolItem) {
-        return messageItems
+  const renderItems = useMemo<ChatRenderItem[]>(() => {
+    if (!liveToolItem) {
+      return messageItems
+    }
+
+    const insertBeforeIndexById =
+      activeAssistantMessageId !== null
+        ? messageItems.findIndex((item) => item.id === activeAssistantMessageId)
+        : -1
+
+    let fallbackAssistantIndex = -1
+    for (let index = messageItems.length - 1; index >= 0; index -= 1) {
+      const item = messageItems[index]
+      if (!item) {
+        continue
       }
-
-      const insertBeforeIndexById =
-        activeAssistantMessageId !== null
-          ? messageItems.findIndex((item) => item.id === activeAssistantMessageId)
-          : -1
-
-      let fallbackAssistantIndex = -1
-      for (let index = messageItems.length - 1; index >= 0; index -= 1) {
-        const item = messageItems[index]
-        if (!item) {
-          continue
-        }
-        if (item.role === 'assistant' && !item.isToolTrace) {
-          fallbackAssistantIndex = index
-          break
-        }
+      if (item.role === 'assistant' && !item.isToolTrace) {
+        fallbackAssistantIndex = index
+        break
       }
+    }
 
-      const insertBeforeIndex =
-        insertBeforeIndexById >= 0 ? insertBeforeIndexById : fallbackAssistantIndex
+    const insertBeforeIndex =
+      insertBeforeIndexById >= 0 ? insertBeforeIndexById : fallbackAssistantIndex
 
-      if (insertBeforeIndex < 0) {
-        return [...messageItems, liveToolItem]
-      }
+    if (insertBeforeIndex < 0) {
+      return [...messageItems, liveToolItem]
+    }
 
-      return [
-        ...messageItems.slice(0, insertBeforeIndex),
-        liveToolItem,
-        ...messageItems.slice(insertBeforeIndex)
-      ]
-    },
-    [activeAssistantMessageId, liveToolItem, messageItems]
-  )
+    return [
+      ...messageItems.slice(0, insertBeforeIndex),
+      liveToolItem,
+      ...messageItems.slice(insertBeforeIndex)
+    ]
+  }, [activeAssistantMessageId, liveToolItem, messageItems])
   const shouldVirtualize = shouldVirtualizeChatMessages(renderItems.length)
   const rowVirtualizer = useVirtualizer({
     count: renderItems.length,

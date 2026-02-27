@@ -46,6 +46,30 @@ function detectLanguage(path: string): string {
   return 'text'
 }
 
+function gitStatusBadgeLabel(status?: FileTreeEntry['gitStatus']): string {
+  if (status === 'modified') return 'M'
+  if (status === 'added') return 'A'
+  if (status === 'deleted') return 'D'
+  if (status === 'renamed') return 'R'
+  if (status === 'copied') return 'C'
+  if (status === 'typechange') return 'T'
+  if (status === 'conflict') return '!'
+  if (status === 'untracked') return 'U'
+  return ''
+}
+
+function gitStatusBadgeClasses(status?: FileTreeEntry['gitStatus']): string {
+  if (status === 'modified') return 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+  if (status === 'added') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+  if (status === 'deleted') return 'border-red-500/40 bg-red-500/10 text-red-300'
+  if (status === 'renamed' || status === 'copied' || status === 'typechange') {
+    return 'border-violet-500/40 bg-violet-500/10 text-violet-300'
+  }
+  if (status === 'conflict') return 'border-red-500/40 bg-red-500/10 text-red-300'
+  if (status === 'untracked') return 'border-sky-500/40 bg-sky-500/10 text-sky-300'
+  return 'border-border/60 bg-muted/30 text-muted-foreground'
+}
+
 export function FileTreePanel({
   projectRootPath,
   scopeKey,
@@ -280,13 +304,23 @@ export function FileTreePanel({
             <button
               key={entry.path}
               type="button"
-              className="flex w-full items-center gap-1 rounded-sm py-1 pr-2 text-left text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              className={`flex w-full items-center gap-1 rounded-sm py-1 pr-2 text-left text-[11px] transition-colors hover:bg-accent hover:text-foreground ${
+                entry.gitStatus ? 'text-foreground/95' : 'text-muted-foreground'
+              }`}
               style={{ paddingLeft: rowPadding }}
               title={entry.path}
               onClick={() => void openFilePreview(entry.path)}
             >
               <FileText className="h-3.5 w-3.5 shrink-0" />
-              <span className="truncate">{entry.name}</span>
+              <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+              {entry.gitStatus ? (
+                <span
+                  className={`ml-auto rounded-sm border px-1 py-[1px] text-[9px] font-semibold uppercase tracking-wide ${gitStatusBadgeClasses(entry.gitStatus)}`}
+                  title={`Git status: ${entry.gitStatus}`}
+                >
+                  {gitStatusBadgeLabel(entry.gitStatus)}
+                </span>
+              ) : null}
             </button>
           )
         }
@@ -436,12 +470,22 @@ export function FileTreePanel({
                   <button
                     key={entry.path}
                     type="button"
-                    className="flex w-full items-center gap-1 rounded-sm px-2 py-1 text-left text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    className={`flex w-full items-center gap-1 rounded-sm px-2 py-1 text-left text-[11px] transition-colors hover:bg-accent hover:text-foreground ${
+                      entry.gitStatus ? 'text-foreground/95' : 'text-muted-foreground'
+                    }`}
                     title={entry.path}
                     onClick={() => void openFilePreview(entry.path)}
                   >
                     <FileText className="h-3.5 w-3.5 shrink-0" />
-                    <span className="truncate">{entry.path}</span>
+                    <span className="min-w-0 flex-1 truncate">{entry.path}</span>
+                    {entry.gitStatus ? (
+                      <span
+                        className={`ml-auto rounded-sm border px-1 py-[1px] text-[9px] font-semibold uppercase tracking-wide ${gitStatusBadgeClasses(entry.gitStatus)}`}
+                        title={`Git status: ${entry.gitStatus}`}
+                      >
+                        {gitStatusBadgeLabel(entry.gitStatus)}
+                      </span>
+                    ) : null}
                   </button>
                 ))}
               </div>

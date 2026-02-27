@@ -1,7 +1,8 @@
-import { ipcMain } from 'electron'
+import { ipcMain, nativeTheme } from 'electron'
 import { z } from 'zod'
 import { ipcChannels } from '../../../shared/ipc/channels'
 import { safeInvoke } from '../../utils/ipc-result'
+import { applyWindowBackgroundToAllWindows } from '../../utils/window-theme'
 import type { IpcContext } from '../context'
 
 const getSchema = z.object({
@@ -24,7 +25,14 @@ export function registerConfigHandlers(context: IpcContext): void {
   ipcMain.handle(ipcChannels.config.set, (_, rawInput) =>
     safeInvoke(() => {
       const input = setSchema.parse(rawInput)
-      return context.config.set(input.key, input.value)
+      const setting = context.config.set(input.key, input.value)
+      if (input.key === 'theme') {
+        applyWindowBackgroundToAllWindows(
+          context.config.getThemePreference(),
+          nativeTheme.shouldUseDarkColors
+        )
+      }
+      return setting
     })
   )
 

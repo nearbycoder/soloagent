@@ -170,7 +170,9 @@ export class TerminalSessionService {
       for (let index = pending.length - 1; index >= 0; index -= 1) {
         const item = pending[index]
         const parentReady =
-          !item.parentTerminalId || restoredIds.has(item.parentTerminalId) || this.sessions.has(item.parentTerminalId)
+          !item.parentTerminalId ||
+          restoredIds.has(item.parentTerminalId) ||
+          this.sessions.has(item.parentTerminalId)
 
         if (!parentReady) continue
 

@@ -228,6 +228,20 @@ export type GitDiffInput = {
   cwd: string
 }
 
+export type GitDiffFilePatchInput = {
+  cwd: string
+  path: string
+  status?: string
+}
+
+export type GitDiffFilePatchResult = {
+  path: string
+  additions: number
+  deletions: number
+  hunks: GitDiffHunk[]
+  patch?: string
+}
+
 export type FileTreeInput = {
   cwd: string
   relativePath?: string
@@ -249,6 +263,15 @@ export type FileTreeEntry = {
   name: string
   path: string
   type: 'file' | 'directory'
+  gitStatus?:
+    | 'modified'
+    | 'added'
+    | 'deleted'
+    | 'renamed'
+    | 'copied'
+    | 'typechange'
+    | 'conflict'
+    | 'untracked'
 }
 
 export type FileReadResult = {

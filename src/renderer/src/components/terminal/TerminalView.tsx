@@ -279,7 +279,8 @@ export function TerminalView({
 
         if (wholeLineDelta !== 0) {
           touchLineRemainderRef.current -= wholeLineDelta
-          const inAlternateScreen = term.getMode(1049) || term.getMode(1047) || term.getMode(47) || false
+          const inAlternateScreen =
+            term.getMode(1049) || term.getMode(1047) || term.getMode(47) || false
 
           if (inAlternateScreen) {
             const stepCount = Math.min(5, Math.max(1, Math.abs(wholeLineDelta)))
@@ -324,7 +325,6 @@ export function TerminalView({
         writeToTerminal(termInstance, normalizeReplayOutput(bufferedOutput))
       }
       renderedOutputRef.current = bufferedOutput
-
     }
 
     void setupTerminal()

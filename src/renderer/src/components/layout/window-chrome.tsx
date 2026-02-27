@@ -2,6 +2,7 @@ import { Minus, Moon, PanelBottom, PanelLeft, PanelRight, Square, Sun, X } from 
 import { useEffect, useState } from 'react'
 import { Button } from '../ui/button'
 import { Switch } from '../ui/switch'
+import { getAccentTintOverlay } from './project-appearance-utils'
 
 type WindowChromeProps = {
   leftCollapsed: boolean
@@ -13,21 +14,6 @@ type WindowChromeProps = {
   onToggleRight: () => void
   onToggleTerminal: () => void
   onToggleTheme: (checked: boolean) => void
-}
-
-function hexToRgb(value: string): { r: number; g: number; b: number } | null {
-  if (!value) {
-    return null
-  }
-  const hex = value.trim().replace('#', '')
-  if (!/^[0-9a-f]{6}$/i.test(hex)) {
-    return null
-  }
-  return {
-    r: Number.parseInt(hex.slice(0, 2), 16),
-    g: Number.parseInt(hex.slice(2, 4), 16),
-    b: Number.parseInt(hex.slice(4, 6), 16)
-  }
 }
 
 export function WindowChrome({
@@ -68,10 +54,7 @@ export function WindowChrome({
     }
   }
 
-  const accentRgb = activeAccentColor ? hexToRgb(activeAccentColor) : null
-  const tintOverlay = accentRgb
-    ? `linear-gradient(rgba(${accentRgb.r}, ${accentRgb.g}, ${accentRgb.b}, 0.17), rgba(${accentRgb.r}, ${accentRgb.g}, ${accentRgb.b}, 0.17))`
-    : undefined
+  const tintOverlay = activeAccentColor ? getAccentTintOverlay(activeAccentColor, 0.17) : undefined
 
   return (
     <header

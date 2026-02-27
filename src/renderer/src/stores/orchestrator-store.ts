@@ -209,8 +209,7 @@ export const useOrchestratorStore = create<StoreState>((set) => ({
             ...state.terminalOutputByScope,
             [scopeKey]: nextScopedOutput
           },
-          terminalOutput:
-            scopeKey === currentScopeKey ? nextScopedOutput : state.terminalOutput
+          terminalOutput: scopeKey === currentScopeKey ? nextScopedOutput : state.terminalOutput
         }
       }
 
