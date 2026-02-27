@@ -2241,13 +2241,13 @@ export function DashboardLayout(): React.JSX.Element {
                   <TabsList className="grid h-7 w-full grid-cols-2 rounded-md bg-muted/80 p-0.5">
                     <TabsTrigger
                       value="git-diff"
-                      className="h-full w-full rounded-sm px-2 text-[11px] data-[state=active]:shadow-sm"
+                      className="h-full w-full rounded-sm px-2 py-0 text-[11px] leading-none data-[state=active]:shadow-sm"
                     >
                       Git Diff
                     </TabsTrigger>
                     <TabsTrigger
                       value="file-tree"
-                      className="h-full w-full rounded-sm px-2 text-[11px] data-[state=active]:shadow-sm"
+                      className="h-full w-full rounded-sm px-2 py-0 text-[11px] leading-none data-[state=active]:shadow-sm"
                     >
                       File Tree
                     </TabsTrigger>
