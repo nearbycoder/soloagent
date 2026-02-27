@@ -33,6 +33,25 @@ let mainWindow: BrowserWindow | null = null
 let ipcRegistered = false
 const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['https:', 'mailto:'])
 
+function createApplicationMenu(): Menu {
+  const template =
+    process.platform === 'darwin'
+      ? [
+          { role: 'appMenu' as const },
+          { role: 'fileMenu' as const },
+          { role: 'editMenu' as const },
+          { role: 'viewMenu' as const },
+          { role: 'windowMenu' as const }
+        ]
+      : [
+          { role: 'fileMenu' as const },
+          { role: 'editMenu' as const },
+          { role: 'viewMenu' as const }
+        ]
+
+  return Menu.buildFromTemplate(template)
+}
+
 function isAllowedExternalUrl(rawUrl: string): boolean {
   try {
     const url = new URL(rawUrl)
@@ -132,11 +151,11 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.electron')
-  Menu.setApplicationMenu(null)
+  Menu.setApplicationMenu(createApplicationMenu())
   logger.info('Application ready')
 
   app.on('browser-window-created', (_, window) => {
-    optimizer.watchWindowShortcuts(window)
+    optimizer.watchWindowShortcuts(window, { zoom: true })
   })
 
   createWindow()

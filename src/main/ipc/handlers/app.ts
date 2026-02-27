@@ -1,14 +1,43 @@
 import { execFileSync } from 'node:child_process'
+import { open, readdir } from 'node:fs/promises'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron'
 import { z } from 'zod'
 import { ipcChannels } from '../../../shared/ipc/channels'
-import type { GitDiffFileChange, GitDiffHunk, GitDiffSummary } from '../../../shared/ipc/types'
+import type {
+  FileReadResult,
+  FileTreeEntry,
+  GitDiffFileChange,
+  GitDiffHunk,
+  GitDiffSummary
+} from '../../../shared/ipc/types'
 import { safeInvoke } from '../../utils/ipc-result'
 import type { IpcContext } from '../context'
 
 const gitDiffInputSchema = z.object({
   cwd: z.string().trim().min(1)
 })
+const fileTreeInputSchema = z.object({
+  cwd: z.string().trim().min(1),
+  relativePath: z.string().default('')
+})
+const fileTreeSearchInputSchema = z.object({
+  cwd: z.string().trim().min(1),
+  query: z.string().trim().min(1),
+  limit: z.number().int().min(1).max(500).default(200)
+})
+const fileReadInputSchema = z.object({
+  cwd: z.string().trim().min(1),
+  path: z.string().trim().min(1),
+  maxBytes: z
+    .number()
+    .int()
+    .min(8 * 1024)
+    .max(2 * 1024 * 1024)
+    .default(512 * 1024)
+})
+const FILE_TREE_ALWAYS_HIDDEN_NAMES = new Set(['.git'])
+const FILE_TREE_MAX_SCANNED_DIRECTORIES = 3000
 
 type MutableGitDiffFileChange = GitDiffFileChange & {
   additions: number
@@ -82,12 +111,18 @@ function ensureFile(
   return created
 }
 
-function parseBranchStatus(branchLine: string | undefined): { branch: string; ahead: number; behind: number } {
+function parseBranchStatus(branchLine: string | undefined): {
+  branch: string
+  ahead: number
+  behind: number
+} {
   if (!branchLine) {
     return { branch: 'unknown', ahead: 0, behind: 0 }
   }
 
-  const withoutPrefix = branchLine.startsWith('## ') ? branchLine.slice(3).trim() : branchLine.trim()
+  const withoutPrefix = branchLine.startsWith('## ')
+    ? branchLine.slice(3).trim()
+    : branchLine.trim()
   const bracketMatch = withoutPrefix.match(/\[(.+)\]/)
   const aheadMatch = bracketMatch?.[1]?.match(/ahead (\d+)/)
   const behindMatch = bracketMatch?.[1]?.match(/behind (\d+)/)
@@ -100,7 +135,10 @@ function parseBranchStatus(branchLine: string | undefined): { branch: string; ah
   }
 }
 
-function parseStatusOutput(statusOutput: string, filesByPath: Map<string, MutableGitDiffFileChange>): void {
+function parseStatusOutput(
+  statusOutput: string,
+  filesByPath: Map<string, MutableGitDiffFileChange>
+): void {
   const lines = statusOutput.split('\n').map((line) => line.trimEnd())
   for (const line of lines) {
     if (!line || line.startsWith('## ')) {
@@ -117,12 +155,17 @@ function parseStatusOutput(statusOutput: string, filesByPath: Map<string, Mutabl
       continue
     }
 
-    const path = rawPath.includes(' -> ') ? rawPath.split(' -> ').at(-1)?.trim() || rawPath : rawPath
+    const path = rawPath.includes(' -> ')
+      ? rawPath.split(' -> ').at(-1)?.trim() || rawPath
+      : rawPath
     ensureFile(filesByPath, path, normalizeStatus(code))
   }
 }
 
-function parseNumstatOutput(numstatOutput: string, filesByPath: Map<string, MutableGitDiffFileChange>): void {
+function parseNumstatOutput(
+  numstatOutput: string,
+  filesByPath: Map<string, MutableGitDiffFileChange>
+): void {
   const lines = numstatOutput.split('\n')
   for (const line of lines) {
     if (!line.trim()) {
@@ -144,7 +187,10 @@ function parseNumstatOutput(numstatOutput: string, filesByPath: Map<string, Muta
   }
 }
 
-function parseDiffHunks(diffOutput: string, filesByPath: Map<string, MutableGitDiffFileChange>): void {
+function parseDiffHunks(
+  diffOutput: string,
+  filesByPath: Map<string, MutableGitDiffFileChange>
+): void {
   const lines = diffOutput.split('\n')
   let currentPath: string | undefined
 
@@ -183,7 +229,10 @@ function parseDiffHunks(diffOutput: string, filesByPath: Map<string, MutableGitD
   }
 }
 
-function parseDiffPatches(diffOutput: string, filesByPath: Map<string, MutableGitDiffFileChange>): void {
+function parseDiffPatches(
+  diffOutput: string,
+  filesByPath: Map<string, MutableGitDiffFileChange>
+): void {
   if (!diffOutput.trim()) {
     return
   }
@@ -245,6 +294,241 @@ function buildGitDiffSummary(cwd: string): GitDiffSummary {
   }
 }
 
+function normalizeRelativePath(rawPath: string): string {
+  const normalized = rawPath.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '').trim()
+  if (!normalized || normalized === '.') {
+    return ''
+  }
+  return normalized
+}
+
+function resolveDirectoryInRoot(cwd: string, rawRelativePath: string): string {
+  const normalizedRelativePath = normalizeRelativePath(rawRelativePath)
+  const targetPath = resolve(cwd, normalizedRelativePath || '.')
+  const relativeToRoot = relative(cwd, targetPath)
+
+  if (
+    isAbsolute(relativeToRoot) ||
+    relativeToRoot === '..' ||
+    relativeToRoot.startsWith(`..${sep}`)
+  ) {
+    throw new Error('Invalid file tree path.')
+  }
+
+  return targetPath
+}
+
+function getGitIgnoredPaths(cwd: string, paths: string[]): Set<string> {
+  if (paths.length === 0) {
+    return new Set()
+  }
+
+  const normalizedPaths = paths.map((path) => path.replace(/\\/g, '/'))
+  const input = `${normalizedPaths.join('\n')}\n`
+
+  try {
+    const output = execFileSync('git', ['check-ignore', '--stdin'], {
+      cwd,
+      input,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      maxBuffer: 4 * 1024 * 1024
+    })
+
+    return new Set(
+      output
+        .split('\n')
+        .map((line) => line.trim().replace(/\\/g, '/'))
+        .filter(Boolean)
+    )
+  } catch (error) {
+    const maybeError = error as {
+      status?: number
+      stdout?: string | Buffer
+    }
+    if (maybeError.status === 1 || maybeError.status === 128) {
+      const stdoutText =
+        typeof maybeError.stdout === 'string'
+          ? maybeError.stdout
+          : Buffer.isBuffer(maybeError.stdout)
+            ? maybeError.stdout.toString('utf8')
+            : ''
+
+      if (!stdoutText.trim()) {
+        return new Set()
+      }
+
+      return new Set(
+        stdoutText
+          .split('\n')
+          .map((line) => line.trim().replace(/\\/g, '/'))
+          .filter(Boolean)
+      )
+    }
+
+    const message = error instanceof Error ? error.message : 'Failed to evaluate gitignore rules.'
+    throw new Error(message)
+  }
+}
+
+function filterGitIgnoredFileTreeEntries(cwd: string, entries: FileTreeEntry[]): FileTreeEntry[] {
+  if (entries.length === 0) {
+    return entries
+  }
+
+  const pathsForCheck = entries.map((entry) =>
+    entry.type === 'directory' ? `${entry.path}/` : entry.path
+  )
+  const ignoredPaths = getGitIgnoredPaths(cwd, pathsForCheck)
+
+  return entries.filter((entry) => {
+    if (FILE_TREE_ALWAYS_HIDDEN_NAMES.has(entry.name)) {
+      return false
+    }
+
+    return !ignoredPaths.has(entry.path) && !ignoredPaths.has(`${entry.path}/`)
+  })
+}
+
+function matchesQuery(path: string, query: string): boolean {
+  const normalizedPath = path.toLowerCase()
+  return normalizedPath.includes(query)
+}
+
+async function searchFileTreeEntries(
+  cwd: string,
+  query: string,
+  limit: number
+): Promise<FileTreeEntry[]> {
+  const normalizedQuery = query.toLowerCase()
+  const results: FileTreeEntry[] = []
+  const queue: string[] = ['']
+  let scannedDirectories = 0
+
+  while (
+    queue.length > 0 &&
+    scannedDirectories < FILE_TREE_MAX_SCANNED_DIRECTORIES &&
+    results.length < limit
+  ) {
+    const currentRelativePath = queue.shift() || ''
+    const currentDirectoryPath = resolveDirectoryInRoot(cwd, currentRelativePath)
+    scannedDirectories += 1
+
+    let entries
+    try {
+      entries = await readdir(currentDirectoryPath, { withFileTypes: true })
+    } catch {
+      continue
+    }
+
+    const visibleEntries = filterGitIgnoredFileTreeEntries(
+      cwd,
+      entries
+        .filter((entry) => entry.isDirectory() || entry.isFile())
+        .map((entry) => {
+          const path = currentRelativePath ? `${currentRelativePath}/${entry.name}` : entry.name
+          const normalizedPath = path.replace(/\\/g, '/')
+          return {
+            name: entry.name,
+            path: normalizedPath,
+            type: entry.isDirectory() ? 'directory' : 'file'
+          } satisfies FileTreeEntry
+        })
+    )
+
+    for (const entry of visibleEntries) {
+      if (entry.type === 'directory') {
+        queue.push(entry.path)
+        continue
+      }
+
+      if (!matchesQuery(entry.path, normalizedQuery)) {
+        continue
+      }
+
+      results.push(entry)
+
+      if (results.length >= limit) {
+        break
+      }
+    }
+  }
+
+  return results.sort((left, right) => left.path.localeCompare(right.path))
+}
+
+async function listFileTreeEntries(cwd: string, relativePath: string): Promise<FileTreeEntry[]> {
+  const normalizedRelativePath = normalizeRelativePath(relativePath)
+  const directoryPath = resolveDirectoryInRoot(cwd, normalizedRelativePath)
+  const entries = await readdir(directoryPath, { withFileTypes: true })
+
+  return filterGitIgnoredFileTreeEntries(
+    cwd,
+    entries
+      .filter((entry) => entry.isDirectory() || entry.isFile())
+      .map((entry) => {
+        const childPath = normalizedRelativePath
+          ? `${normalizedRelativePath}/${entry.name}`
+          : entry.name
+        const type: FileTreeEntry['type'] = entry.isDirectory() ? 'directory' : 'file'
+        return {
+          name: entry.name,
+          path: childPath.replace(/\\/g, '/'),
+          type
+        }
+      })
+  ).sort((left, right) => {
+    if (left.type !== right.type) {
+      return left.type === 'directory' ? -1 : 1
+    }
+    return left.name.localeCompare(right.name)
+  })
+}
+
+function isLikelyBinary(buffer: Buffer): boolean {
+  const probeLength = Math.min(buffer.length, 1024)
+  for (let index = 0; index < probeLength; index += 1) {
+    if (buffer[index] === 0) {
+      return true
+    }
+  }
+  return false
+}
+
+async function readProjectFile(
+  cwd: string,
+  path: string,
+  maxBytes: number
+): Promise<FileReadResult> {
+  const normalizedPath = normalizeRelativePath(path)
+  if (!normalizedPath) {
+    throw new Error('Invalid file path.')
+  }
+
+  const absolutePath = resolveDirectoryInRoot(cwd, normalizedPath)
+  const file = await open(absolutePath, 'r')
+  try {
+    const probeBuffer = Buffer.alloc(maxBytes + 1)
+    const { bytesRead } = await file.read(probeBuffer, 0, maxBytes + 1, 0)
+    const raw = probeBuffer.subarray(0, bytesRead)
+
+    if (isLikelyBinary(raw)) {
+      throw new Error('Binary files are not supported in preview.')
+    }
+
+    const truncated = bytesRead > maxBytes
+    const content = (truncated ? raw.subarray(0, maxBytes) : raw).toString('utf8')
+
+    return {
+      path: normalizedPath,
+      content,
+      truncated
+    }
+  } finally {
+    await file.close()
+  }
+}
+
 export function registerAppHandlers(context: IpcContext): void {
   ipcMain.handle(ipcChannels.app.health, () =>
     safeInvoke(() => ({
@@ -259,6 +543,24 @@ export function registerAppHandlers(context: IpcContext): void {
     safeInvoke(() => {
       const input = gitDiffInputSchema.parse(rawInput)
       return buildGitDiffSummary(input.cwd)
+    })
+  )
+  ipcMain.handle(ipcChannels.app.fileTree, (_, rawInput) =>
+    safeInvoke(async () => {
+      const input = fileTreeInputSchema.parse(rawInput)
+      return listFileTreeEntries(input.cwd, input.relativePath)
+    })
+  )
+  ipcMain.handle(ipcChannels.app.fileTreeSearch, (_, rawInput) =>
+    safeInvoke(async () => {
+      const input = fileTreeSearchInputSchema.parse(rawInput)
+      return searchFileTreeEntries(input.cwd, input.query, input.limit)
+    })
+  )
+  ipcMain.handle(ipcChannels.app.fileRead, (_, rawInput) =>
+    safeInvoke(async () => {
+      const input = fileReadInputSchema.parse(rawInput)
+      return readProjectFile(input.cwd, input.path, input.maxBytes)
     })
   )
   ipcMain.handle(ipcChannels.app.platform, () => safeInvoke(() => process.platform))

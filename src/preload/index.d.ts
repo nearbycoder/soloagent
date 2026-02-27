@@ -1,5 +1,6 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
 import type {
+  AppSetting,
   AgentProfile,
   AgentTask,
   AgentEvent,
@@ -16,9 +17,15 @@ import type {
   CloseTerminalInput,
   CreateTerminalInput,
   DeleteProjectInput,
+  UpdateProjectInput,
   RenameTerminalInput,
   DeleteAgentProfileInput,
   EnqueueAgentTaskInput,
+  FileReadInput,
+  FileReadResult,
+  FileTreeInput,
+  FileTreeEntry,
+  FileTreeSearchInput,
   GitDiffInput,
   GitDiffSummary,
   IpcResult,
@@ -39,6 +46,9 @@ type AppApi = {
   metrics: () => Promise<IpcResult<unknown>>
   logs: () => Promise<IpcResult<unknown>>
   gitDiff: (input: GitDiffInput) => Promise<IpcResult<GitDiffSummary>>
+  fileTree: (input: FileTreeInput) => Promise<IpcResult<FileTreeEntry[]>>
+  fileTreeSearch: (input: FileTreeSearchInput) => Promise<IpcResult<FileTreeEntry[]>>
+  fileRead: (input: FileReadInput) => Promise<IpcResult<FileReadResult>>
   platform: () => Promise<IpcResult<string>>
   windowMinimize: () => Promise<IpcResult<boolean>>
   windowMaximize: () => Promise<IpcResult<boolean>>
@@ -76,7 +86,7 @@ type AgentApi = {
 type ConfigApi = {
   get: (key: string) => Promise<IpcResult<string | undefined>>
   set: (key: string, value: string) => Promise<IpcResult<unknown>>
-  all: () => Promise<IpcResult<unknown>>
+  all: () => Promise<IpcResult<AppSetting[]>>
 }
 
 type ChatApi = {
@@ -90,6 +100,7 @@ type ChatApi = {
 type ProjectApi = {
   create: (input: CreateProjectInput) => Promise<IpcResult<ProjectRecord>>
   list: () => Promise<IpcResult<ProjectRecord[]>>
+  update: (input: UpdateProjectInput) => Promise<IpcResult<ProjectRecord | undefined>>
   delete: (input: DeleteProjectInput) => Promise<IpcResult<boolean>>
   select: (input?: SelectProjectInput) => Promise<IpcResult<ProjectRecord | undefined>>
   current: () => Promise<IpcResult<ProjectRecord | undefined>>

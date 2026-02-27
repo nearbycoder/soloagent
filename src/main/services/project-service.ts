@@ -2,7 +2,8 @@ import type {
   CreateProjectInput,
   DeleteProjectInput,
   ProjectRecord,
-  SelectProjectInput
+  SelectProjectInput,
+  UpdateProjectInput
 } from '../../shared/ipc/types'
 import { AppSettingsRepository } from '../data/repositories/app-settings-repository'
 import { ProjectsRepository } from '../data/repositories/projects-repository'
@@ -21,6 +22,10 @@ export class ProjectService {
 
   list(): ProjectRecord[] {
     return this.projectsRepository.list()
+  }
+
+  update(input: UpdateProjectInput): ProjectRecord | undefined {
+    return this.projectsRepository.update(input)
   }
 
   delete(input: DeleteProjectInput): boolean {

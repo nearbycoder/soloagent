@@ -2,10 +2,11 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Folder,
   FolderPlus,
   Plus,
+  Settings2,
   Trash2,
+  Upload,
   X
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -16,14 +17,20 @@ import { PatchDiff } from '@pierre/diffs/react'
 import type { GitDiffSummary, ProjectRecord, TerminalSession } from '../../../../shared/ipc/types'
 import { AssistantChatPanel } from '../chat/assistant-chat-panel'
 import { Button } from '../ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card'
+import { Card, CardContent, CardHeader, CardTitle } from '../ui/card'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs'
 import { TerminalTabs } from '../terminal/TerminalTabs'
+import { FileTreePanel } from './file-tree-panel'
 import { useTheme } from './theme-provider'
 import { WindowChrome } from './window-chrome'
 
 const HOME_PROJECT_SCOPE = '__home__'
 const SPACE_STORAGE_KEY = 'soloagent.spaces.v1'
 const CENTER_SPLIT_STORAGE_KEY = 'soloagent.centerSplit.topPercent.v1'
+const PROJECT_LOGO_KEY_PREFIX = 'project.logo.'
+const PROJECT_ACCENT_KEY_PREFIX = 'project.accent.'
+const HOME_VISIBILITY_CONFIG_KEY = 'workspace.home.visible'
+const MAX_PROJECT_LOGO_FILE_BYTES = 2 * 1024 * 1024
 const DEFAULT_CENTER_TOP_PERCENT = 50
 const MIN_CENTER_TOP_PX = 140
 const MIN_CENTER_BOTTOM_PX = 180
@@ -41,6 +48,44 @@ type SpaceState = {
 }
 
 type ChatStreamingByScope = Record<string, Record<string, boolean>>
+type RightSidebarTab = 'git-diff' | 'file-tree'
+type ProjectEntry = {
+  id?: string
+  name: string
+  rootPath?: string
+  scopeKey: string
+}
+
+type NoProjectPlaceholderProps = {
+  title: string
+  description: string
+  compact?: boolean
+  onAddProject: () => void
+}
+
+function NoProjectPlaceholder({
+  title,
+  description,
+  compact = false,
+  onAddProject
+}: NoProjectPlaceholderProps): React.JSX.Element {
+  return (
+    <div
+      className={`flex h-full items-center justify-center rounded-md border border-dashed border-border/70 bg-muted/30 p-3 ${
+        compact ? 'min-h-[96px]' : 'min-h-[150px]'
+      }`}
+    >
+      <div className="max-w-[360px] space-y-2 text-center">
+        <div className="text-sm font-medium">{title}</div>
+        <div className="text-xs text-muted-foreground">{description}</div>
+        <Button type="button" size="sm" className="h-8 gap-1" onClick={onAddProject}>
+          <FolderPlus className="h-3.5 w-3.5" />
+          Add Project
+        </Button>
+      </div>
+    </div>
+  )
+}
 
 function ActivityIndicator({ active }: { active: boolean }): React.JSX.Element | null {
   if (!active) {
@@ -57,6 +102,90 @@ function ActivityIndicator({ active }: { active: boolean }): React.JSX.Element |
 
 function toScopeKey(projectId?: string): string {
   return projectId || HOME_PROJECT_SCOPE
+}
+
+function getProjectLogoKey(projectId: string): string {
+  return `${PROJECT_LOGO_KEY_PREFIX}${projectId}`
+}
+
+function getProjectAccentKey(projectId: string): string {
+  return `${PROJECT_ACCENT_KEY_PREFIX}${projectId}`
+}
+
+function normalizeAccentColor(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return ''
+  }
+
+  const withHash = trimmed.startsWith('#') ? trimmed : `#${trimmed}`
+  const shortHex = /^#([0-9a-f]{3})$/i.exec(withHash)
+  if (shortHex) {
+    const [r, g, b] = shortHex[1].split('')
+    return `#${r}${r}${g}${g}${b}${b}`.toLowerCase()
+  }
+
+  return /^#[0-9a-f]{6}$/i.test(withHash) ? withHash.toLowerCase() : ''
+}
+
+function hexToRgb(value: string): { r: number; g: number; b: number } | null {
+  if (!value) {
+    return null
+  }
+  const hex = value.trim().replace('#', '')
+  if (!/^[0-9a-f]{6}$/i.test(hex)) {
+    return null
+  }
+  return {
+    r: Number.parseInt(hex.slice(0, 2), 16),
+    g: Number.parseInt(hex.slice(2, 4), 16),
+    b: Number.parseInt(hex.slice(4, 6), 16)
+  }
+}
+
+function getAccentTintOverlay(color: string, alpha: number): string | undefined {
+  const rgb = hexToRgb(color)
+  if (!rgb) {
+    return undefined
+  }
+  return `linear-gradient(rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha}), rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha}))`
+}
+
+function getProjectInitial(name: string): string {
+  const trimmed = name.trim()
+  if (!trimmed) {
+    return '?'
+  }
+  return trimmed.charAt(0).toUpperCase()
+}
+
+type ProjectAvatarProps = {
+  name: string
+  logoDataUrl?: string
+  className?: string
+  textClassName?: string
+}
+
+function ProjectAvatar({
+  name,
+  logoDataUrl,
+  className = 'h-5 w-5',
+  textClassName = 'text-[11px]'
+}: ProjectAvatarProps): React.JSX.Element {
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center justify-center overflow-hidden rounded-md border border-border/70 bg-muted ${className}`}
+      aria-hidden="true"
+    >
+      {logoDataUrl ? (
+        <img src={logoDataUrl} alt="" className="h-full w-full object-cover" />
+      ) : (
+        <span className={`font-bold text-foreground ${textClassName}`}>
+          {getProjectInitial(name)}
+        </span>
+      )}
+    </span>
+  )
 }
 
 function makeSpaceId(): string {
@@ -147,7 +276,16 @@ export function DashboardLayout(): React.JSX.Element {
   const setProjectScope = useOrchestratorStore((s) => s.setProjectScope)
   const setActiveTerminal = useOrchestratorStore((s) => s.setActiveTerminal)
   const [projects, setProjects] = useState<ProjectRecord[]>([])
+  const [projectLogosById, setProjectLogosById] = useState<Record<string, string>>({})
+  const [projectAccentColorsById, setProjectAccentColorsById] = useState<Record<string, string>>({})
+  const [homeVisible, setHomeVisible] = useState(true)
   const [selectedProjectId, setSelectedProjectId] = useState<string>()
+  const [projectSettingsProjectId, setProjectSettingsProjectId] = useState<string | null>(null)
+  const [projectSettingsNameDraft, setProjectSettingsNameDraft] = useState('')
+  const [projectSettingsLogoDraft, setProjectSettingsLogoDraft] = useState('')
+  const [projectSettingsAccentDraft, setProjectSettingsAccentDraft] = useState('')
+  const [projectSettingsSaving, setProjectSettingsSaving] = useState(false)
+  const [projectSettingsError, setProjectSettingsError] = useState('')
   const [actionStatus, setActionStatus] = useState<string>('')
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [rightCollapsed, setRightCollapsed] = useState(false)
@@ -163,12 +301,14 @@ export function DashboardLayout(): React.JSX.Element {
   const [gitDiffError, setGitDiffError] = useState('')
   const [expandedGitDiffFiles, setExpandedGitDiffFiles] = useState<Record<string, boolean>>({})
   const [gitDiffModalFileIndex, setGitDiffModalFileIndex] = useState<number | null>(null)
+  const [rightSidebarTab, setRightSidebarTab] = useState<RightSidebarTab>('git-diff')
   const [chatStreamingByScope, setChatStreamingByScope] = useState<ChatStreamingByScope>({})
   const [centerTopPercent, setCenterTopPercent] = useState<number>(() =>
     readPersistedCenterTopPercent()
   )
   const [isResizingCenter, setIsResizingCenter] = useState(false)
   const centerPanelRef = useRef<HTMLDivElement | null>(null)
+  const projectLogoInputRef = useRef<HTMLInputElement | null>(null)
   const apiReady = Boolean(window.api)
   const projectScopeKey = toScopeKey(projectScopeId)
 
@@ -181,6 +321,22 @@ export function DashboardLayout(): React.JSX.Element {
     () => projects.find((project) => project.id === selectedProjectId),
     [projects, selectedProjectId]
   )
+  const selectedProjectAccentColor = useMemo(() => {
+    return projectAccentColorsById[projectScopeKey]
+  }, [projectAccentColorsById, projectScopeKey])
+  const projectSettingsProject = useMemo(
+    () =>
+      projectSettingsProjectId
+        ? projectSettingsProjectId === HOME_PROJECT_SCOPE
+          ? undefined
+          : projects.find((project) => project.id === projectSettingsProjectId)
+        : undefined,
+    [projectSettingsProjectId, projects]
+  )
+  const projectSettingsIsHome = projectSettingsProjectId === HOME_PROJECT_SCOPE
+  const projectSettingsDisplayName = projectSettingsProject?.name || 'Home'
+  const projectSettingsRootPath =
+    projectSettingsProject?.rootPath || 'Home scope (no project directory)'
 
   const spacesForCurrentScope = spaceState.spacesByScope[projectScopeKey] || []
   const activeSpaceId =
@@ -219,18 +375,27 @@ export function DashboardLayout(): React.JSX.Element {
     }
     return next
   }, [spaceActivityByScope])
+  const noProjectAvailable = !homeVisible && projects.length === 0
+  const leftPanelVisible = noProjectAvailable || !leftCollapsed
+  const effectiveLeftCollapsed = !leftPanelVisible
+  const effectiveRightCollapsed = noProjectAvailable ? true : rightCollapsed
+  const effectiveTerminalCollapsed = noProjectAvailable ? true : terminalPanelCollapsed
 
   const gridTemplateColumns = useMemo(() => {
+    if (noProjectAvailable) {
+      return leftPanelVisible ? '300px' : 'minmax(0, 1fr)'
+    }
+
     const columns: string[] = []
-    if (!leftCollapsed) {
+    if (leftPanelVisible) {
       columns.push('300px')
     }
     columns.push('minmax(0, 1fr)')
-    if (!rightCollapsed) {
+    if (!effectiveRightCollapsed) {
       columns.push('280px')
     }
     return columns.join(' ')
-  }, [leftCollapsed, rightCollapsed])
+  }, [effectiveRightCollapsed, leftPanelVisible, noProjectAvailable])
 
   const setProjectExpanded = useCallback((scopeKey: string, expanded: boolean): void => {
     setExpandedProjectScopes((state) => ({
@@ -378,14 +543,33 @@ export function DashboardLayout(): React.JSX.Element {
     if (!window.api) return
     void (async () => {
       try {
-        const [projectsResponse, currentProjectResponse] = await Promise.all([
+        const [projectsResponse, currentProjectResponse, homeVisibilityResponse] = await Promise.all([
           window.api.project.list(),
-          window.api.project.current()
+          window.api.project.current(),
+          window.api.config.get(HOME_VISIBILITY_CONFIG_KEY)
         ])
 
-        const currentProjectId = currentProjectResponse.ok
+        const listedProjects = projectsResponse.ok ? projectsResponse.data : []
+        if (projectsResponse.ok) {
+          setProjects(listedProjects)
+        }
+
+        const homeIsVisible = !homeVisibilityResponse.ok || homeVisibilityResponse.data !== '0'
+        setHomeVisible(homeIsVisible)
+
+        let currentProjectId = currentProjectResponse.ok
           ? currentProjectResponse.data?.id
           : undefined
+        if (!homeIsVisible && !currentProjectId && listedProjects.length > 0) {
+          const fallbackProjectId = listedProjects[0]?.id
+          if (fallbackProjectId) {
+            const selectResponse = await window.api.project.select({ projectId: fallbackProjectId })
+            currentProjectId = selectResponse.ok
+              ? selectResponse.data?.id || fallbackProjectId
+              : fallbackProjectId
+          }
+        }
+
         const currentScopeKey = toScopeKey(currentProjectId)
         setSelectedProjectId(currentProjectId)
         setProjectScope(currentProjectId)
@@ -396,19 +580,64 @@ export function DashboardLayout(): React.JSX.Element {
           refresh()
         ])
 
-        if (projectsResponse.ok) {
-          setProjects(projectsResponse.data)
-        }
         if (activeTerminalResponse.ok && activeTerminalResponse.data) {
           setActiveTerminal(activeTerminalResponse.data)
         }
-        await ensureProjectHasTerminal(currentProjectId)
+        if (homeIsVisible || currentProjectId) {
+          await ensureProjectHasTerminal(currentProjectId)
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown startup error'
         setActionStatus(`Load failed: ${message}`)
       }
     })()
   }, [ensureProjectHasTerminal, refresh, setActiveTerminal, setProjectScope])
+
+  useEffect(() => {
+    if (!window.api) {
+      return
+    }
+
+    let cancelled = false
+    void window.api.config.all().then((response) => {
+      if (!response.ok || cancelled) {
+        return
+      }
+
+      const validProjectIds = new Set([HOME_PROJECT_SCOPE, ...projects.map((project) => project.id)])
+      const nextProjectLogosById: Record<string, string> = {}
+      const nextProjectAccentColorsById: Record<string, string> = {}
+      for (const setting of response.data) {
+        if (setting.key.startsWith(PROJECT_LOGO_KEY_PREFIX)) {
+          const projectId = setting.key.slice(PROJECT_LOGO_KEY_PREFIX.length)
+          if (!projectId || !validProjectIds.has(projectId) || !setting.value) {
+            continue
+          }
+
+          nextProjectLogosById[projectId] = setting.value
+          continue
+        }
+
+        if (!setting.key.startsWith(PROJECT_ACCENT_KEY_PREFIX)) {
+          continue
+        }
+
+        const projectId = setting.key.slice(PROJECT_ACCENT_KEY_PREFIX.length)
+        const normalized = normalizeAccentColor(setting.value)
+        if (!projectId || !validProjectIds.has(projectId) || !normalized) {
+          continue
+        }
+        nextProjectAccentColorsById[projectId] = normalized
+      }
+
+      setProjectLogosById(nextProjectLogosById)
+      setProjectAccentColorsById(nextProjectAccentColorsById)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [projects])
 
   useEffect(() => {
     void loadGitDiff()
@@ -581,6 +810,10 @@ export function DashboardLayout(): React.JSX.Element {
   )
 
   useEffect(() => {
+    if (projectScopeKey === HOME_PROJECT_SCOPE && !homeVisible) {
+      return
+    }
+
     setSpaceState((state) => {
       const existing = state.spacesByScope[projectScopeKey]
       if (existing) {
@@ -627,7 +860,7 @@ export function DashboardLayout(): React.JSX.Element {
         }
       }
     })
-  }, [projectScopeKey])
+  }, [homeVisible, projectScopeKey])
 
   useEffect(() => {
     if (spacesForCurrentScope.length === 0) return
@@ -747,7 +980,9 @@ export function DashboardLayout(): React.JSX.Element {
     )
 
     await refresh()
-    await ensureProjectHasTerminal(nextProjectId)
+    if (homeVisible || nextProjectId) {
+      await ensureProjectHasTerminal(nextProjectId)
+    }
     setActionStatus(
       response.data ? `Project selected: ${response.data.name}` : 'Project scope cleared.'
     )
@@ -770,14 +1005,338 @@ export function DashboardLayout(): React.JSX.Element {
     }
 
     setProjects((previous) => previous.filter((project) => project.id !== projectId))
+    setProjectLogosById((state) => {
+      const next = { ...state }
+      delete next[projectId]
+      return next
+    })
+    setProjectAccentColorsById((state) => {
+      const next = { ...state }
+      delete next[projectId]
+      return next
+    })
+    if (projectSettingsProjectId === projectId) {
+      setProjectSettingsProjectId(null)
+      setProjectSettingsNameDraft('')
+      setProjectSettingsLogoDraft('')
+      setProjectSettingsAccentDraft('')
+      setProjectSettingsError('')
+    }
+    void Promise.all([
+      window.api.config.set(getProjectLogoKey(projectId), ''),
+      window.api.config.set(getProjectAccentKey(projectId), '')
+    ])
     if (selectedProjectId === projectId) {
-      await selectProject(undefined)
+      const remainingProjectId = projects.find((project) => project.id !== projectId)?.id
+      if (remainingProjectId) {
+        await selectProject(remainingProjectId)
+      } else if (homeVisible) {
+        await selectProject(undefined)
+      } else {
+        await window.api.project.select(undefined)
+        setSelectedProjectId(undefined)
+        setProjectScope(undefined)
+        loadSidebarPrefs(undefined)
+        setActiveTerminal(undefined)
+      }
       setActionStatus('Project removed.')
       return
     }
     await refresh()
     setActionStatus('Project removed.')
   }
+
+  const deleteHomeScope = useCallback(async (): Promise<void> => {
+    if (!window.api) {
+      return
+    }
+
+    const confirmed = window.confirm(
+      'Delete "Home"? This closes Home tabs, removes Home spaces, and clears Home styling.'
+    )
+    if (!confirmed) {
+      return
+    }
+
+    const homeTerminals = terminals.filter((terminal) => !terminal.projectId)
+    const homeTerminalsById = new Map(homeTerminals.map((terminal) => [terminal.id, terminal]))
+    const homeTerminalDepth = (terminalId: string): number => {
+      let depth = 0
+      let cursor = homeTerminalsById.get(terminalId)
+      while (cursor?.parentTerminalId) {
+        depth += 1
+        cursor = homeTerminalsById.get(cursor.parentTerminalId)
+      }
+      return depth
+    }
+
+    const closeOrder = [...homeTerminals].sort(
+      (a, b) => homeTerminalDepth(b.id) - homeTerminalDepth(a.id)
+    )
+    for (const terminal of closeOrder) {
+      await closeTerminal(terminal.id)
+    }
+
+    setSpaceState((state) => ({
+      ...state,
+      spacesByScope: {
+        ...state.spacesByScope,
+        [HOME_PROJECT_SCOPE]: []
+      },
+      activeSpaceByScope: {
+        ...state.activeSpaceByScope,
+        [HOME_PROJECT_SCOPE]: undefined
+      },
+      terminalSpaceByScope: {
+        ...state.terminalSpaceByScope,
+        [HOME_PROJECT_SCOPE]: {}
+      }
+    }))
+
+    if (projectScopeKey === HOME_PROJECT_SCOPE) {
+      setActiveTerminal(undefined)
+    }
+
+    setProjectLogosById((state) => {
+      const next = { ...state }
+      delete next[HOME_PROJECT_SCOPE]
+      return next
+    })
+    setProjectAccentColorsById((state) => {
+      const next = { ...state }
+      delete next[HOME_PROJECT_SCOPE]
+      return next
+    })
+
+    if (projectSettingsProjectId === HOME_PROJECT_SCOPE) {
+      setProjectSettingsProjectId(null)
+      setProjectSettingsNameDraft('')
+      setProjectSettingsLogoDraft('')
+      setProjectSettingsAccentDraft('')
+      setProjectSettingsError('')
+    }
+
+    const [, , visibilityResponse] = await Promise.all([
+      window.api.config.set(getProjectLogoKey(HOME_PROJECT_SCOPE), ''),
+      window.api.config.set(getProjectAccentKey(HOME_PROJECT_SCOPE), ''),
+      window.api.config.set(HOME_VISIBILITY_CONFIG_KEY, '0')
+    ])
+    setHomeVisible(false)
+
+    if (projectScopeKey === HOME_PROJECT_SCOPE) {
+      const fallbackProjectId = projects[0]?.id
+      if (fallbackProjectId) {
+        await selectProject(fallbackProjectId)
+      } else {
+        const clearSelectionResponse = await window.api.project.select(undefined)
+        const nextProjectId = clearSelectionResponse.ok
+          ? clearSelectionResponse.data?.id
+          : undefined
+        setSelectedProjectId(nextProjectId)
+        setProjectScope(nextProjectId)
+        loadSidebarPrefs(nextProjectId)
+        setActiveTerminal(undefined)
+      }
+    }
+
+    await refresh()
+    setActionStatus(
+      visibilityResponse.ok
+        ? 'Home removed.'
+        : `Home removed, but visibility preference failed: ${visibilityResponse.error.message}`
+    )
+  }, [
+    closeTerminal,
+    projects,
+    projectScopeKey,
+    projectSettingsProjectId,
+    refresh,
+    selectProject,
+    terminals,
+    setActiveTerminal
+  ])
+
+  const deleteProjectEntry = useCallback(
+    async (entry: ProjectEntry): Promise<void> => {
+      if (entry.id) {
+        await deleteProject(entry.id)
+        return
+      }
+      await deleteHomeScope()
+    },
+    [deleteHomeScope, deleteProject]
+  )
+
+  const openProjectSettings = useCallback(
+    (scopeKey: string): void => {
+      const project =
+        scopeKey === HOME_PROJECT_SCOPE
+          ? undefined
+          : projects.find((entry) => entry.id === scopeKey)
+      if (scopeKey !== HOME_PROJECT_SCOPE && !project) {
+        return
+      }
+
+      setProjectSettingsProjectId(scopeKey)
+      setProjectSettingsNameDraft(project?.name || 'Home')
+      setProjectSettingsLogoDraft(projectLogosById[scopeKey] || '')
+      setProjectSettingsAccentDraft(projectAccentColorsById[scopeKey] || '')
+      setProjectSettingsError('')
+    },
+    [projectAccentColorsById, projectLogosById, projects]
+  )
+
+  const closeProjectSettings = useCallback((): void => {
+    if (projectSettingsSaving) {
+      return
+    }
+
+    setProjectSettingsProjectId(null)
+    setProjectSettingsNameDraft('')
+    setProjectSettingsLogoDraft('')
+    setProjectSettingsAccentDraft('')
+    setProjectSettingsError('')
+    if (projectLogoInputRef.current) {
+      projectLogoInputRef.current.value = ''
+    }
+  }, [projectSettingsSaving])
+
+  const saveProjectSettings = useCallback(async (): Promise<void> => {
+    if (!window.api || !projectSettingsProjectId) {
+      return
+    }
+
+    const normalizedName = projectSettingsNameDraft.trim()
+    const savingHomeSettings = projectSettingsProjectId === HOME_PROJECT_SCOPE
+    const normalizedAccentColor = normalizeAccentColor(projectSettingsAccentDraft)
+    if (projectSettingsAccentDraft && !normalizedAccentColor) {
+      setProjectSettingsError('Accent color must be a valid hex color.')
+      return
+    }
+    if (!savingHomeSettings && !normalizedName) {
+      setProjectSettingsError('Project name is required.')
+      return
+    }
+
+    setProjectSettingsSaving(true)
+    setProjectSettingsError('')
+
+    if (!savingHomeSettings) {
+      const updateResponse = await window.api.project.update({
+        projectId: projectSettingsProjectId,
+        name: normalizedName
+      })
+      if (!updateResponse.ok || !updateResponse.data) {
+        setProjectSettingsError(
+          updateResponse.ok ? 'Unable to update project.' : updateResponse.error.message
+        )
+        setProjectSettingsSaving(false)
+        return
+      }
+
+      setProjects((previous) =>
+        previous.map((project) =>
+          project.id === projectSettingsProjectId ? updateResponse.data! : project
+        )
+      )
+    }
+
+    const [logoResponse, accentResponse] = await Promise.all([
+      window.api.config.set(getProjectLogoKey(projectSettingsProjectId), projectSettingsLogoDraft),
+      window.api.config.set(getProjectAccentKey(projectSettingsProjectId), normalizedAccentColor)
+    ])
+
+    if (logoResponse.ok) {
+      setProjectLogosById((state) => {
+        const next = { ...state }
+        if (projectSettingsLogoDraft) {
+          next[projectSettingsProjectId] = projectSettingsLogoDraft
+        } else {
+          delete next[projectSettingsProjectId]
+        }
+        return next
+      })
+    }
+
+    if (accentResponse.ok) {
+      setProjectAccentColorsById((state) => {
+        const next = { ...state }
+        if (normalizedAccentColor) {
+          next[projectSettingsProjectId] = normalizedAccentColor
+        } else {
+          delete next[projectSettingsProjectId]
+        }
+        return next
+      })
+    }
+
+    const saveErrors: string[] = []
+    if (!logoResponse.ok) {
+      saveErrors.push(`logo save failed: ${logoResponse.error.message}`)
+    }
+    if (!accentResponse.ok) {
+      saveErrors.push(`accent save failed: ${accentResponse.error.message}`)
+    }
+    if (saveErrors.length > 0) {
+      const failurePrefix = savingHomeSettings
+        ? 'Home settings updated, but'
+        : 'Project renamed, but'
+      setProjectSettingsError(`${failurePrefix} ${saveErrors.join('; ')}`)
+      setProjectSettingsSaving(false)
+      return
+    }
+
+    setProjectSettingsSaving(false)
+    setProjectSettingsProjectId(null)
+    setProjectSettingsNameDraft('')
+    setProjectSettingsLogoDraft('')
+    setProjectSettingsAccentDraft('')
+    setProjectSettingsError('')
+    setActionStatus(
+      savingHomeSettings ? 'Home settings saved.' : `Project settings saved for ${normalizedName}.`
+    )
+  }, [
+    projectSettingsAccentDraft,
+    projectSettingsLogoDraft,
+    projectSettingsNameDraft,
+    projectSettingsProjectId
+  ])
+
+  useEffect(() => {
+    if (!projectSettingsProjectId) {
+      return
+    }
+    if (projectSettingsProjectId === HOME_PROJECT_SCOPE) {
+      return
+    }
+
+    const exists = projects.some((project) => project.id === projectSettingsProjectId)
+    if (!exists) {
+      setProjectSettingsProjectId(null)
+      setProjectSettingsNameDraft('')
+      setProjectSettingsLogoDraft('')
+      setProjectSettingsAccentDraft('')
+      setProjectSettingsError('')
+    }
+  }, [projectSettingsProjectId, projects])
+
+  useEffect(() => {
+    if (!projectSettingsProjectId) {
+      return
+    }
+
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeProjectSettings()
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [closeProjectSettings, projectSettingsProjectId])
 
   const createSpaceInCurrentScope = useCallback(async (): Promise<void> => {
     const previousActiveSpaceId = activeSpaceId
@@ -1166,9 +1725,10 @@ export function DashboardLayout(): React.JSX.Element {
   )
 
   const projectEntries = useMemo(() => {
-    const entries: Array<{ id?: string; name: string; rootPath?: string; scopeKey: string }> = [
-      { id: undefined, name: 'Home', scopeKey: HOME_PROJECT_SCOPE }
-    ]
+    const entries: ProjectEntry[] = []
+    if (homeVisible) {
+      entries.push({ id: undefined, name: 'Home', scopeKey: HOME_PROJECT_SCOPE })
+    }
 
     for (const project of projects) {
       entries.push({
@@ -1180,7 +1740,7 @@ export function DashboardLayout(): React.JSX.Element {
     }
 
     return entries
-  }, [projects])
+  }, [homeVisible, projects])
 
   const chatSessions = useMemo(() => {
     const sessions: Array<{
@@ -1217,14 +1777,14 @@ export function DashboardLayout(): React.JSX.Element {
       normalized.includes('load failed')
     )
   }, [actionStatus])
-
   return (
     <div className="flex h-screen flex-col">
       <WindowChrome
-        leftCollapsed={leftCollapsed}
-        rightCollapsed={rightCollapsed}
-        terminalCollapsed={terminalPanelCollapsed}
+        leftCollapsed={effectiveLeftCollapsed}
+        rightCollapsed={effectiveRightCollapsed}
+        terminalCollapsed={effectiveTerminalCollapsed}
         isDarkMode={resolvedTheme === 'dark'}
+        activeAccentColor={selectedProjectAccentColor}
         onToggleLeft={() => setLeftCollapsed((value) => !value)}
         onToggleRight={() => setRightCollapsed((value) => !value)}
         onToggleTerminal={() => setTerminalPanelCollapsed((value) => !value)}
@@ -1236,7 +1796,7 @@ export function DashboardLayout(): React.JSX.Element {
           gridTemplateColumns
         }}
       >
-        {!leftCollapsed ? (
+        {leftPanelVisible ? (
           <Card className="min-h-0 overflow-hidden">
             <CardHeader className="px-3 py-2">
               <div className="flex items-center justify-between gap-2">
@@ -1260,48 +1820,85 @@ export function DashboardLayout(): React.JSX.Element {
                 </div>
               ) : null}
 
-              <div className="space-y-1.5">
-                {projectEntries.map((entry) => {
-                  const isSelected = (selectedProjectId || undefined) === entry.id
-                  const isExpanded = expandedProjectScopes[entry.scopeKey] ?? isSelected
-                  const projectIsActive = Boolean(projectActivityByScope[entry.scopeKey])
-                  const spacesForEntry =
-                    spaceState.spacesByScope[entry.scopeKey] ||
-                    (isSelected ? spacesForCurrentScope : [])
-                  const entryActiveSpaceId =
-                    spaceState.activeSpaceByScope[entry.scopeKey] || spacesForEntry[0]?.id
-                  const entryTerminalSpaceMap =
-                    spaceState.terminalSpaceByScope[entry.scopeKey] || {}
+              {projectEntries.length === 0 ? (
+                <NoProjectPlaceholder
+                  compact
+                  title="No Projects Yet"
+                  description="Add a project to create spaces and start working."
+                  onAddProject={() => void addProject()}
+                />
+              ) : (
+                <div className="space-y-1.5">
+                  {projectEntries.map((entry) => {
+                    const isSelected = (selectedProjectId || undefined) === entry.id
+                    const isExpanded = expandedProjectScopes[entry.scopeKey] ?? isSelected
+                    const projectIsActive = Boolean(projectActivityByScope[entry.scopeKey])
+                    const entryAccentColor = projectAccentColorsById[entry.scopeKey]
+                    const entryAccentTint = entryAccentColor
+                      ? getAccentTintOverlay(entryAccentColor, isSelected ? 0.17 : 0.12)
+                      : undefined
+                    const spacesForEntry =
+                      spaceState.spacesByScope[entry.scopeKey] ||
+                      (isSelected ? spacesForCurrentScope : [])
+                    const entryActiveSpaceId =
+                      spaceState.activeSpaceByScope[entry.scopeKey] || spacesForEntry[0]?.id
 
-                  return (
-                    <div
-                      key={entry.scopeKey}
-                      className={`rounded-md border border-border/60 ${
-                        isSelected ? 'bg-accent/30' : 'bg-transparent'
-                      }`}
-                    >
-                      <div className="group flex items-center gap-1 px-1 py-0.5">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (!isSelected) {
-                              void selectProject(entry.id)
-                              return
-                            }
-                            setProjectExpanded(entry.scopeKey, true)
-                          }}
-                          className={`flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                            isSelected ? 'text-accent-foreground' : 'hover:bg-accent/40'
-                          }`}
-                          title={entry.rootPath}
-                        >
-                          <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                          <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                            {entry.name}
-                          </span>
-                          <div className="flex items-center gap-1.5">
-                            <ActivityIndicator active={projectIsActive} />
-                            {entry.id ? (
+                    return (
+                      <div
+                        key={entry.scopeKey}
+                        className={`overflow-hidden rounded-md border border-border/60 ${
+                          isSelected ? 'bg-accent/30' : 'bg-transparent'
+                        }`}
+                      >
+                        {entryAccentColor ? (
+                          <div
+                            className="h-1 w-full bg-card/95"
+                            style={{
+                              backgroundImage: entryAccentTint
+                            }}
+                          />
+                        ) : null}
+                        <div className="group flex items-center gap-1 px-1 py-0.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!isSelected) {
+                                void selectProject(entry.id)
+                                return
+                              }
+                              setProjectExpanded(entry.scopeKey, true)
+                            }}
+                            className={`flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                              isSelected ? 'text-accent-foreground' : 'hover:bg-accent/40'
+                            }`}
+                            title={entry.rootPath}
+                          >
+                            <ProjectAvatar
+                              name={entry.name}
+                              logoDataUrl={projectLogosById[entry.scopeKey]}
+                              className="h-5 w-5"
+                              textClassName="text-[11px]"
+                            />
+                            <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                              {entry.name}
+                            </span>
+                            <div className="flex items-center gap-1.5">
+                              <ActivityIndicator active={projectIsActive} />
+                              <Button
+                                type="button"
+                                size="icon"
+                                variant="ghost"
+                                className="h-5 w-5 shrink-0 text-muted-foreground opacity-0 pointer-events-none transition-opacity group-hover:opacity-100 group-hover:pointer-events-auto focus-visible:opacity-100 focus-visible:pointer-events-auto"
+                                aria-label={`Settings for ${entry.name}`}
+                                title={`Settings for ${entry.name}`}
+                                onClick={(event) => {
+                                  event.preventDefault()
+                                  event.stopPropagation()
+                                  openProjectSettings(entry.scopeKey)
+                                }}
+                              >
+                                <Settings2 className="h-3 w-3" />
+                              </Button>
                               <Button
                                 type="button"
                                 size="icon"
@@ -1312,158 +1909,151 @@ export function DashboardLayout(): React.JSX.Element {
                                 onClick={(event) => {
                                   event.preventDefault()
                                   event.stopPropagation()
-                                  void deleteProject(entry.id as string)
+                                  void deleteProjectEntry(entry)
                                 }}
                               >
                                 <Trash2 className="h-3 w-3" />
                               </Button>
-                            ) : null}
-                            <span className="text-xs text-muted-foreground">
-                              ({spacesForEntry.length})
-                            </span>
-                          </div>
-                        </button>
-                        <Button
-                          type="button"
-                          size="icon"
-                          variant="ghost"
-                          className="h-7 w-7 shrink-0"
-                          onClick={() => toggleProjectExpanded(entry.scopeKey)}
-                          aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${entry.name}`}
-                          title={`${isExpanded ? 'Collapse' : 'Expand'} ${entry.name}`}
-                        >
-                          {isExpanded ? (
-                            <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-                          ) : (
-                            <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
-                          )}
-                        </Button>
-                      </div>
+                            </div>
+                          </button>
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            className="h-7 w-7 shrink-0"
+                            onClick={() => toggleProjectExpanded(entry.scopeKey)}
+                            aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${entry.name}`}
+                            title={`${isExpanded ? 'Collapse' : 'Expand'} ${entry.name}`}
+                          >
+                            {isExpanded ? (
+                              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+                            ) : (
+                              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+                            )}
+                          </Button>
+                        </div>
 
-                      {isExpanded ? (
-                        <div className="space-y-1 border-t border-border/60 px-1.5 py-1.5">
-                          <div className="flex items-center justify-between px-0.5 pb-0.5">
-                            <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                              Spaces
-                            </span>
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              className="h-5 w-5"
-                              onClick={() => createSpaceInCurrentScope()}
-                              aria-label={`New space in ${entry.name}`}
-                              disabled={!isSelected}
-                              title={isSelected ? undefined : 'Select project to add spaces'}
-                            >
-                              <Plus className="h-3 w-3" />
-                            </Button>
-                          </div>
-
-                          {spacesForEntry.map((space) => {
-                            const tabCount = Object.values(entryTerminalSpaceMap).filter(
-                              (mappedSpaceId) => mappedSpaceId === space.id
-                            ).length
-                            const spaceIsActive = Boolean(
-                              spaceActivityByScope[entry.scopeKey]?.[space.id]
-                            )
-                            const isEditingSpace =
-                              editingSpace?.scopeKey === entry.scopeKey &&
-                              editingSpace.spaceId === space.id
-
-                            return (
-                              <div
-                                key={space.id}
-                                className={`group flex w-full items-center justify-between rounded-md px-1.5 py-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                                  entryActiveSpaceId === space.id
-                                    ? 'bg-accent text-accent-foreground'
-                                    : 'hover:bg-accent/40'
-                                }`}
+                        {isExpanded ? (
+                          <div className="space-y-1 border-t border-border/60 px-1.5 py-1.5">
+                            <div className="flex items-center justify-between px-0.5 pb-0.5">
+                              <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                                Spaces
+                              </span>
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                className="h-5 w-5"
+                                onClick={() => createSpaceInCurrentScope()}
+                                aria-label={`New space in ${entry.name}`}
+                                disabled={!isSelected}
+                                title={isSelected ? undefined : 'Select project to add spaces'}
                               >
-                                {isEditingSpace ? (
-                                  <input
-                                    autoFocus
-                                    value={spaceNameDraft}
-                                    onChange={(event) => setSpaceNameDraft(event.target.value)}
-                                    onBlur={() =>
-                                      commitSpaceRename(entry.scopeKey, space.id, space.name)
-                                    }
-                                    onKeyDown={(event) => {
-                                      if (event.key === 'Enter') {
-                                        event.preventDefault()
+                                <Plus className="h-3 w-3" />
+                              </Button>
+                            </div>
+
+                            {spacesForEntry.map((space) => {
+                              const spaceIsActive = Boolean(
+                                spaceActivityByScope[entry.scopeKey]?.[space.id]
+                              )
+                              const isEditingSpace =
+                                editingSpace?.scopeKey === entry.scopeKey &&
+                                editingSpace.spaceId === space.id
+
+                              return (
+                                <div
+                                  key={space.id}
+                                  className={`group flex w-full items-center justify-between rounded-md px-1.5 py-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                                    entryActiveSpaceId === space.id
+                                      ? 'bg-accent text-accent-foreground'
+                                      : 'hover:bg-accent/40'
+                                  }`}
+                                >
+                                  {isEditingSpace ? (
+                                    <input
+                                      autoFocus
+                                      value={spaceNameDraft}
+                                      onChange={(event) => setSpaceNameDraft(event.target.value)}
+                                      onBlur={() =>
                                         commitSpaceRename(entry.scopeKey, space.id, space.name)
                                       }
-                                      if (event.key === 'Escape') {
-                                        event.preventDefault()
-                                        setEditingSpace(null)
-                                        setSpaceNameDraft('')
-                                      }
-                                    }}
-                                    className="h-7 w-full rounded-sm border border-input bg-background px-2 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                    aria-label={`Rename ${space.name}`}
-                                  />
-                                ) : (
-                                  <>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setSpaceState((state) => ({
-                                          ...state,
-                                          activeSpaceByScope: {
-                                            ...state.activeSpaceByScope,
-                                            [entry.scopeKey]: space.id
-                                          }
-                                        }))
-                                        if (isSelected) {
-                                          selectSpace(space.id)
-                                          return
-                                        }
-                                        void selectProject(entry.id)
-                                      }}
-                                      className="flex min-w-0 flex-1 items-center justify-between text-left"
-                                    >
-                                      <span
-                                        className="truncate text-xs font-medium"
-                                        onDoubleClick={(event) => {
+                                      onKeyDown={(event) => {
+                                        if (event.key === 'Enter') {
                                           event.preventDefault()
-                                          event.stopPropagation()
-                                          setEditingSpace({
-                                            scopeKey: entry.scopeKey,
-                                            spaceId: space.id
-                                          })
-                                          setSpaceNameDraft(space.name)
+                                          commitSpaceRename(entry.scopeKey, space.id, space.name)
+                                        }
+                                        if (event.key === 'Escape') {
+                                          event.preventDefault()
+                                          setEditingSpace(null)
+                                          setSpaceNameDraft('')
+                                        }
+                                      }}
+                                      className="h-7 w-full rounded-sm border border-input bg-background px-2 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                      aria-label={`Rename ${space.name}`}
+                                    />
+                                  ) : (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setSpaceState((state) => ({
+                                            ...state,
+                                            activeSpaceByScope: {
+                                              ...state.activeSpaceByScope,
+                                              [entry.scopeKey]: space.id
+                                            }
+                                          }))
+                                          if (isSelected) {
+                                            selectSpace(space.id)
+                                            return
+                                          }
+                                          void selectProject(entry.id)
                                         }}
-                                        title={`Double-click to rename ${space.name}`}
+                                        className="flex min-w-0 flex-1 items-center justify-between text-left"
                                       >
-                                        {space.name}
-                                      </span>
-                                      <span className="ml-2 flex items-center gap-2 text-xs text-muted-foreground">
-                                        <ActivityIndicator active={spaceIsActive} />
-                                        <span>{tabCount} tabs</span>
-                                      </span>
-                                    </button>
-                                    <Button
-                                      type="button"
-                                      size="icon"
-                                      variant="ghost"
-                                      className="h-5 w-5 shrink-0 text-muted-foreground opacity-0 transition-opacity pointer-events-none disabled:opacity-0 group-hover:opacity-100 group-hover:disabled:opacity-100 group-hover:pointer-events-auto focus-visible:opacity-100 focus-visible:pointer-events-auto hover:text-destructive"
-                                      onClick={() => void deleteSpaceInCurrentScope(space.id)}
-                                      aria-label={`Delete ${space.name}`}
-                                      title={`Delete ${space.name}`}
-                                      disabled={!isSelected}
-                                    >
-                                      <Trash2 className="h-3 w-3" />
-                                    </Button>
-                                  </>
-                                )}
-                              </div>
-                            )
-                          })}
-                        </div>
-                      ) : null}
-                    </div>
-                  )
-                })}
-              </div>
+                                        <span
+                                          className="truncate text-xs font-medium"
+                                          onDoubleClick={(event) => {
+                                            event.preventDefault()
+                                            event.stopPropagation()
+                                            setEditingSpace({
+                                              scopeKey: entry.scopeKey,
+                                              spaceId: space.id
+                                            })
+                                            setSpaceNameDraft(space.name)
+                                          }}
+                                          title={`Double-click to rename ${space.name}`}
+                                        >
+                                          {space.name}
+                                        </span>
+                                        <span className="ml-2 flex items-center gap-2 text-xs text-muted-foreground">
+                                          <ActivityIndicator active={spaceIsActive} />
+                                        </span>
+                                      </button>
+                                      <Button
+                                        type="button"
+                                        size="icon"
+                                        variant="ghost"
+                                        className="h-5 w-5 shrink-0 text-muted-foreground opacity-0 transition-opacity pointer-events-none disabled:opacity-0 group-hover:opacity-100 group-hover:disabled:opacity-100 group-hover:pointer-events-auto focus-visible:opacity-100 focus-visible:pointer-events-auto hover:text-destructive"
+                                        onClick={() => void deleteSpaceInCurrentScope(space.id)}
+                                        aria-label={`Delete ${space.name}`}
+                                        title={`Delete ${space.name}`}
+                                        disabled={!isSelected}
+                                      >
+                                        <Trash2 className="h-3 w-3" />
+                                      </Button>
+                                    </>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        ) : null}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
 
               {showActionStatus ? (
                 <div className="rounded-md border border-border/70 bg-muted/50 p-2 text-xs text-muted-foreground">
@@ -1474,24 +2064,35 @@ export function DashboardLayout(): React.JSX.Element {
           </Card>
         ) : null}
 
-        <div
-          ref={centerPanelRef}
-          className="grid min-h-0 gap-1"
-          style={
-            terminalPanelCollapsed
-              ? { gridTemplateRows: 'minmax(0, 1fr)' }
-              : { gridTemplateRows: `${centerTopPercent}% ${CENTER_SPLITTER_PX}px minmax(0, 1fr)` }
-          }
-        >
+        {!noProjectAvailable ? (
+          <div
+            ref={centerPanelRef}
+            className="grid min-h-0 gap-1"
+            style={
+              terminalPanelCollapsed
+                ? { gridTemplateRows: 'minmax(0, 1fr)' }
+                : {
+                    gridTemplateRows: `${centerTopPercent}% ${CENTER_SPLITTER_PX}px minmax(0, 1fr)`
+                  }
+            }
+          >
           <Card className="min-h-0 flex flex-col overflow-hidden">
             <CardContent className="min-h-0 flex-1 p-2">
-              <AssistantChatPanel
-                activeScopeKey={projectScopeKey}
-                activeSpaceId={activeSpaceId}
-                sessions={chatSessions}
-                colorMode={resolvedTheme}
-                onStreamingChange={handleChatStreamingChange}
-              />
+              {noProjectAvailable ? (
+                <NoProjectPlaceholder
+                  title="No Project Selected"
+                  description="Add a project to start chatting in a workspace."
+                  onAddProject={() => void addProject()}
+                />
+              ) : (
+                <AssistantChatPanel
+                  activeScopeKey={projectScopeKey}
+                  activeSpaceId={activeSpaceId}
+                  sessions={chatSessions}
+                  colorMode={resolvedTheme}
+                  onStreamingChange={handleChatStreamingChange}
+                />
+              )}
             </CardContent>
           </Card>
 
@@ -1510,142 +2111,402 @@ export function DashboardLayout(): React.JSX.Element {
           {!terminalPanelCollapsed ? (
             <Card className="min-h-0 flex flex-col overflow-hidden">
               <CardContent className="min-h-0 flex-1 overflow-hidden p-2">
-                <TerminalTabs
-                  terminals={terminalsInActiveSpace}
-                  activeTerminalId={activeTerminal?.id}
-                  colorMode={resolvedTheme}
-                  onActiveTerminalChange={setActiveTerminal}
-                  onCreateTab={handleCreateTab}
-                  onCreateSplit={handleCreateSplit}
-                  onCloseTerminal={handleCloseTerminalRequest}
-                  onRenameTerminal={handleRenameTerminalRequest}
-                />
+                {noProjectAvailable ? (
+                  <NoProjectPlaceholder
+                    title="No Terminal Workspace"
+                    description="Add a project to open terminals and run commands."
+                    onAddProject={() => void addProject()}
+                  />
+                ) : (
+                  <TerminalTabs
+                    terminals={terminalsInActiveSpace}
+                    activeTerminalId={activeTerminal?.id}
+                    colorMode={resolvedTheme}
+                    onActiveTerminalChange={setActiveTerminal}
+                    onCreateTab={handleCreateTab}
+                    onCreateSplit={handleCreateSplit}
+                    onCloseTerminal={handleCloseTerminalRequest}
+                    onRenameTerminal={handleRenameTerminalRequest}
+                  />
+                )}
               </CardContent>
             </Card>
           ) : null}
-        </div>
+          </div>
+        ) : null}
 
-        {!rightCollapsed ? (
+        {!noProjectAvailable && !rightCollapsed ? (
           <Card className="min-h-0 flex flex-col overflow-hidden">
-            <CardHeader className="px-3 py-2">
-              <CardTitle className="truncate text-sm">Git Diff</CardTitle>
-              <CardDescription className="text-xs">
-                {selectedProject
-                  ? gitDiff
-                    ? `${gitDiff.branch}  ${gitDiff.changedFiles} file${gitDiff.changedFiles === 1 ? '' : 's'} changed`
-                    : 'Working tree changes in this branch.'
-                  : 'Select a project to inspect branch changes.'}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="min-h-0 flex-1 overflow-y-auto space-y-2 px-3 pb-3 pt-0 text-xs">
-              {!selectedProject ? (
-                <div className="rounded-md border border-border/70 bg-muted/40 p-2 text-muted-foreground">
-                  Choose a project from the left sidebar to view git changes.
-                </div>
-              ) : gitDiffError ? (
-                <div className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-destructive">
-                  {gitDiffError}
-                </div>
-              ) : gitDiffLoading && !gitDiff ? (
-                <div className="rounded-md border border-border/70 bg-muted/40 p-2 text-muted-foreground">
-                  Loading diff...
-                </div>
-              ) : gitDiff ? (
-                <>
-                  <div className="rounded-md border p-1.5">
-                    <div className="font-medium">Branch</div>
-                    <div className="text-muted-foreground">
-                      {gitDiff.branch}
-                      {gitDiff.ahead > 0 || gitDiff.behind > 0
-                        ? `  (ahead ${gitDiff.ahead}, behind ${gitDiff.behind})`
-                        : ''}
-                    </div>
-                  </div>
-                  <div className="rounded-md border p-1.5">
-                    <div className="font-medium">Line Changes</div>
-                    <div className="text-muted-foreground">
-                      <span className="text-emerald-500">+{gitDiff.totalAdditions}</span>
-                      {'  '}
-                      <span className="text-red-500">-{gitDiff.totalDeletions}</span>
-                    </div>
-                  </div>
-
-                  {gitDiff.clean ? (
-                    <div className="rounded-md border border-border/70 bg-muted/40 p-2 text-muted-foreground">
-                      Working tree is clean.
-                    </div>
-                  ) : (
-                    <div className="space-y-1.5">
-                      {gitDiffFiles.map((file) => {
-                        const diffFileKey = getDiffFileKey(file.path)
-                        const expanded = expandedGitDiffFiles[diffFileKey] || false
-                        const hasPatch = Boolean(file.patch && file.patch.trim().length > 0)
-
-                        return (
-                          <div key={file.path} className="rounded-md border border-border/70 p-1.5">
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="min-w-0">
-                                <div className="truncate font-medium">{file.path}</div>
-                                <div className="text-[11px] capitalize text-muted-foreground">
-                                  {file.status}
-                                </div>
-                              </div>
-                              <div className="shrink-0 text-right text-[11px] text-muted-foreground">
-                                <div className="text-emerald-500">+{file.additions}</div>
-                                <div className="text-red-500">-{file.deletions}</div>
-                              </div>
-                            </div>
-
-                            <div className="mt-1 flex items-center justify-between gap-2">
-                              <div className="min-w-0 truncate text-[10px] text-muted-foreground">
-                                {file.hunks.length > 0
-                                  ? `${file.hunks.length} hunk${file.hunks.length === 1 ? '' : 's'}`
-                                  : 'No parsed hunks'}
-                              </div>
-                              <div className="flex items-center gap-1">
-                                <button
-                                  type="button"
-                                  className="rounded-sm border border-border/70 px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                                  onClick={() => openGitDiffModal(file.path)}
-                                  disabled={!hasPatch}
-                                >
-                                  Full
-                                </button>
-                                <button
-                                  type="button"
-                                  className="rounded-sm border border-border/70 px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                                  onClick={() => toggleGitDiffFile(file.path)}
-                                  disabled={!hasPatch}
-                                >
-                                  {hasPatch ? (expanded ? 'Hide Diff' : 'Show Diff') : 'No Patch'}
-                                </button>
-                              </div>
-                            </div>
-
-                            {expanded && hasPatch ? (
-                              <div className="mt-1.5 overflow-hidden rounded-sm border border-border/70 bg-background/60">
-                                <PatchDiff
-                                  patch={file.patch || ''}
-                                  options={patchDiffOptions}
-                                  className="text-[11px]"
-                                />
-                              </div>
-                            ) : null}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </>
+            <CardContent className="min-h-0 flex-1 overflow-hidden p-1.5">
+              {noProjectAvailable ? (
+                <NoProjectPlaceholder
+                  title="No Project Insights"
+                  description="Add a project to browse files and review diffs."
+                  onAddProject={() => void addProject()}
+                />
               ) : (
-                <div className="rounded-md border border-border/70 bg-muted/40 p-2 text-muted-foreground">
-                  No diff data available.
-                </div>
+                <Tabs
+                  value={rightSidebarTab}
+                  onValueChange={(value) => setRightSidebarTab(value as RightSidebarTab)}
+                  className="flex h-full min-h-0 flex-col"
+                >
+                  <TabsList className="grid h-8 w-full grid-cols-2 rounded-md bg-muted/80 p-0.5">
+                    <TabsTrigger
+                      value="git-diff"
+                      className="h-6 rounded-sm text-[11px] data-[state=active]:shadow-sm"
+                    >
+                      Git Diff
+                    </TabsTrigger>
+                    <TabsTrigger
+                      value="file-tree"
+                      className="h-6 rounded-sm text-[11px] data-[state=active]:shadow-sm"
+                    >
+                      File Tree
+                    </TabsTrigger>
+                  </TabsList>
+
+                  <TabsContent
+                    value="git-diff"
+                    className="mt-1.5 min-h-0 flex-1 overflow-y-auto space-y-2 text-xs"
+                  >
+                    {!selectedProject ? (
+                      <div className="rounded-md border border-border/70 bg-muted/40 p-2 text-muted-foreground">
+                        Choose a project from the left sidebar to view git changes.
+                      </div>
+                    ) : gitDiffError ? (
+                      <div className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-destructive">
+                        {gitDiffError}
+                      </div>
+                    ) : gitDiffLoading && !gitDiff ? (
+                      <div className="rounded-md border border-border/70 bg-muted/40 p-2 text-muted-foreground">
+                        Loading diff...
+                      </div>
+                    ) : gitDiff ? (
+                      <>
+                        <div className="rounded-md border p-1.5">
+                          <div className="font-medium">Branch</div>
+                          <div className="text-muted-foreground">
+                            {gitDiff.branch}
+                            {gitDiff.ahead > 0 || gitDiff.behind > 0
+                              ? `  (ahead ${gitDiff.ahead}, behind ${gitDiff.behind})`
+                              : ''}
+                          </div>
+                        </div>
+                        <div className="rounded-md border p-1.5">
+                          <div className="font-medium">Line Changes</div>
+                          <div className="text-muted-foreground">
+                            <span className="text-emerald-500">+{gitDiff.totalAdditions}</span>
+                            {'  '}
+                            <span className="text-red-500">-{gitDiff.totalDeletions}</span>
+                          </div>
+                        </div>
+
+                        {gitDiff.clean ? (
+                          <div className="rounded-md border border-border/70 bg-muted/40 p-2 text-muted-foreground">
+                            Working tree is clean.
+                          </div>
+                        ) : (
+                          <div className="space-y-1.5">
+                            {gitDiffFiles.map((file) => {
+                              const diffFileKey = getDiffFileKey(file.path)
+                              const expanded = expandedGitDiffFiles[diffFileKey] || false
+                              const hasPatch = Boolean(file.patch && file.patch.trim().length > 0)
+
+                              return (
+                                <div
+                                  key={file.path}
+                                  className="rounded-md border border-border/70 p-1.5"
+                                >
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <div className="truncate font-medium">{file.path}</div>
+                                      <div className="text-[11px] capitalize text-muted-foreground">
+                                        {file.status}
+                                      </div>
+                                    </div>
+                                    <div className="shrink-0 text-right text-[11px] text-muted-foreground">
+                                      <div className="text-emerald-500">+{file.additions}</div>
+                                      <div className="text-red-500">-{file.deletions}</div>
+                                    </div>
+                                  </div>
+
+                                  <div className="mt-1 flex items-center justify-between gap-2">
+                                    <div className="min-w-0 truncate text-[10px] text-muted-foreground">
+                                      {file.hunks.length > 0
+                                        ? `${file.hunks.length} hunk${file.hunks.length === 1 ? '' : 's'}`
+                                        : 'No parsed hunks'}
+                                    </div>
+                                    <div className="flex items-center gap-1">
+                                      <button
+                                        type="button"
+                                        className="rounded-sm border border-border/70 px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                                        onClick={() => openGitDiffModal(file.path)}
+                                        disabled={!hasPatch}
+                                      >
+                                        Full
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="rounded-sm border border-border/70 px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                                        onClick={() => toggleGitDiffFile(file.path)}
+                                        disabled={!hasPatch}
+                                      >
+                                        {hasPatch
+                                          ? expanded
+                                            ? 'Hide Diff'
+                                            : 'Show Diff'
+                                          : 'No Patch'}
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  {expanded && hasPatch ? (
+                                    <div className="mt-1.5 overflow-hidden rounded-sm border border-border/70 bg-background/60">
+                                      <PatchDiff
+                                        patch={file.patch || ''}
+                                        options={patchDiffOptions}
+                                        className="text-[11px]"
+                                      />
+                                    </div>
+                                  ) : null}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="rounded-md border border-border/70 bg-muted/40 p-2 text-muted-foreground">
+                        No diff data available.
+                      </div>
+                    )}
+                  </TabsContent>
+
+                  <TabsContent value="file-tree" className="mt-1.5 min-h-0 flex-1 overflow-hidden">
+                    <FileTreePanel
+                      projectRootPath={selectedProject?.rootPath}
+                      scopeKey={projectScopeKey}
+                      spaceId={activeSpaceId}
+                      colorMode={resolvedTheme}
+                    />
+                  </TabsContent>
+                </Tabs>
               )}
             </CardContent>
           </Card>
         ) : null}
       </div>
+
+      {projectSettingsProjectId ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3"
+          onClick={() => closeProjectSettings()}
+        >
+          <div
+            className="flex w-[min(620px,100%)] max-w-full flex-col overflow-hidden rounded-lg border border-border/70 bg-background shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-2 border-b border-border/70 px-3 py-2">
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium">Project Settings</div>
+                <div className="truncate text-[11px] text-muted-foreground">
+                  {projectSettingsRootPath}
+                </div>
+              </div>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="h-7 w-7"
+                onClick={() => closeProjectSettings()}
+                title="Close"
+                aria-label="Close project settings"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+
+            <div className="max-h-[70vh] overflow-y-auto p-3">
+              <div className="space-y-1.5 rounded-md border border-border/70 p-2">
+                <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  General
+                </div>
+                <label className="space-y-1 text-xs">
+                  <span className="text-muted-foreground">Project Name</span>
+                  <input
+                    value={projectSettingsNameDraft}
+                    disabled={projectSettingsIsHome}
+                    onChange={(event) => {
+                      setProjectSettingsNameDraft(event.target.value)
+                      if (projectSettingsError) {
+                        setProjectSettingsError('')
+                      }
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault()
+                        void saveProjectSettings()
+                      }
+                    }}
+                    className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                    maxLength={120}
+                  />
+                </label>
+                {projectSettingsIsHome ? (
+                  <div className="text-[11px] text-muted-foreground">
+                    Home name is fixed. Use logo and accent settings below.
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="mt-2 space-y-2 rounded-md border border-border/70 p-2">
+                <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Space Logo
+                </div>
+                <div className="flex items-center gap-3">
+                  <ProjectAvatar
+                    name={projectSettingsNameDraft || projectSettingsDisplayName}
+                    logoDataUrl={projectSettingsLogoDraft || undefined}
+                    className="h-16 w-16 rounded-lg"
+                    textClassName="text-2xl"
+                  />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      ref={projectLogoInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0]
+                        event.target.value = ''
+                        if (!file) {
+                          return
+                        }
+
+                        if (!file.type.startsWith('image/')) {
+                          setProjectSettingsError('Please choose an image file.')
+                          return
+                        }
+                        if (file.size > MAX_PROJECT_LOGO_FILE_BYTES) {
+                          setProjectSettingsError('Logo must be 2 MB or smaller.')
+                          return
+                        }
+
+                        const reader = new FileReader()
+                        reader.onload = () => {
+                          if (typeof reader.result !== 'string') {
+                            setProjectSettingsError('Unable to read image data.')
+                            return
+                          }
+                          setProjectSettingsLogoDraft(reader.result)
+                          setProjectSettingsError('')
+                        }
+                        reader.onerror = () => {
+                          setProjectSettingsError('Unable to read selected image.')
+                        }
+                        reader.readAsDataURL(file)
+                      }}
+                    />
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      className="h-8 gap-1"
+                      onClick={() => projectLogoInputRef.current?.click()}
+                    >
+                      <Upload className="h-3.5 w-3.5" />
+                      Upload Logo
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-8"
+                      disabled={!projectSettingsLogoDraft}
+                      onClick={() => {
+                        setProjectSettingsLogoDraft('')
+                        setProjectSettingsError('')
+                      }}
+                    >
+                      Remove
+                    </Button>
+                  </div>
+                </div>
+                <div className="text-[11px] text-muted-foreground">
+                  Accepted: image files up to 2 MB.
+                </div>
+              </div>
+
+              <div className="mt-2 space-y-2 rounded-md border border-border/70 p-2">
+                <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Accent Color
+                </div>
+                <div className="flex items-center gap-3">
+                  <span
+                    className="h-9 w-9 shrink-0 rounded-md border border-border/70 bg-muted/40"
+                    style={{
+                      backgroundColor: projectSettingsAccentDraft || undefined
+                    }}
+                    aria-hidden="true"
+                  />
+                  <input
+                    type="color"
+                    aria-label="Project accent color"
+                    value={projectSettingsAccentDraft || '#64748b'}
+                    onChange={(event) => {
+                      setProjectSettingsAccentDraft(normalizeAccentColor(event.target.value))
+                      setProjectSettingsError('')
+                    }}
+                    className="h-8 w-11 shrink-0 cursor-pointer rounded-md border border-input bg-background p-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                  />
+                  <div className="min-w-0 flex-1 truncate rounded-md border border-border/70 bg-muted/30 px-2 py-1 font-mono text-[11px] text-muted-foreground">
+                    {projectSettingsAccentDraft || 'No accent'}
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-8"
+                    disabled={!projectSettingsAccentDraft}
+                    onClick={() => {
+                      setProjectSettingsAccentDraft('')
+                      setProjectSettingsError('')
+                    }}
+                  >
+                    Clear
+                  </Button>
+                </div>
+                <div className="text-[11px] text-muted-foreground">
+                  The active title bar and this project card will use a subtle tint.
+                </div>
+              </div>
+
+              <div className="mt-2 rounded-md border border-dashed border-border/70 bg-muted/30 p-2 text-xs text-muted-foreground">
+                Additional settings will appear here.
+              </div>
+
+              {projectSettingsError ? (
+                <div className="mt-2 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
+                  {projectSettingsError}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-border/70 px-3 py-2">
+              <Button type="button" variant="ghost" onClick={() => closeProjectSettings()}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                onClick={() => void saveProjectSettings()}
+                disabled={projectSettingsSaving || projectSettingsNameDraft.trim().length === 0}
+              >
+                {projectSettingsSaving ? 'Saving...' : 'Save Settings'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {gitDiffModalOpen && gitDiffModalFile ? (
         <div
@@ -1663,7 +2524,7 @@ export function DashboardLayout(): React.JSX.Element {
                   <span>{gitDiffModalFile.status}</span>
                   <span>{' • '}</span>
                   <span className="text-emerald-500">+{gitDiffModalFile.additions}</span>
-                  <span>{' '}</span>
+                  <span> </span>
                   <span className="text-red-500">-{gitDiffModalFile.deletions}</span>
                 </div>
               </div>

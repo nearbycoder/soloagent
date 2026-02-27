@@ -15,7 +15,11 @@ import type {
   CreateAgentProfileInput,
   DeleteAgentProfileInput,
   DeleteProjectInput,
+  UpdateProjectInput,
   EnqueueAgentTaskInput,
+  FileReadInput,
+  FileTreeInput,
+  FileTreeSearchInput,
   GitDiffInput,
   ResizeTerminalInput,
   RestartAgentInput,
@@ -34,6 +38,10 @@ const appApi = {
   metrics: () => ipcRenderer.invoke(ipcChannels.app.metrics),
   logs: () => ipcRenderer.invoke(ipcChannels.app.logs),
   gitDiff: (input: GitDiffInput) => ipcRenderer.invoke(ipcChannels.app.gitDiff, input),
+  fileTree: (input: FileTreeInput) => ipcRenderer.invoke(ipcChannels.app.fileTree, input),
+  fileTreeSearch: (input: FileTreeSearchInput) =>
+    ipcRenderer.invoke(ipcChannels.app.fileTreeSearch, input),
+  fileRead: (input: FileReadInput) => ipcRenderer.invoke(ipcChannels.app.fileRead, input),
   platform: () => ipcRenderer.invoke(ipcChannels.app.platform),
   windowMinimize: () => ipcRenderer.invoke(ipcChannels.app.windowMinimize),
   windowMaximize: () => ipcRenderer.invoke(ipcChannels.app.windowMaximize),
@@ -94,7 +102,8 @@ const configApi = {
 const chatApi = {
   complete: (input: ChatCompleteInput) => ipcRenderer.invoke(ipcChannels.chat.complete, input),
   abort: (input: ChatAbortInput) => ipcRenderer.invoke(ipcChannels.chat.abort, input),
-  historyGet: (input: ChatHistoryScopeInput) => ipcRenderer.invoke(ipcChannels.chat.historyGet, input),
+  historyGet: (input: ChatHistoryScopeInput) =>
+    ipcRenderer.invoke(ipcChannels.chat.historyGet, input),
   historyReplace: (input: ChatHistoryReplaceInput) =>
     ipcRenderer.invoke(ipcChannels.chat.historyReplace, input),
   onEvent: (callback: (event: ChatEvent) => void): Unsubscribe => {
@@ -109,6 +118,7 @@ const chatApi = {
 const projectApi = {
   create: (input: CreateProjectInput) => ipcRenderer.invoke(ipcChannels.project.create, input),
   list: () => ipcRenderer.invoke(ipcChannels.project.list),
+  update: (input: UpdateProjectInput) => ipcRenderer.invoke(ipcChannels.project.update, input),
   delete: (input: DeleteProjectInput) => ipcRenderer.invoke(ipcChannels.project.delete, input),
   select: (input?: SelectProjectInput) => ipcRenderer.invoke(ipcChannels.project.select, input),
   current: () => ipcRenderer.invoke(ipcChannels.project.current)

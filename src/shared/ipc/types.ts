@@ -58,6 +58,11 @@ export type DeleteProjectInput = {
   projectId: string
 }
 
+export type UpdateProjectInput = {
+  projectId: string
+  name: string
+}
+
 export type SelectProjectInput = {
   projectId?: string
 }
@@ -221,6 +226,35 @@ export type ChatHistoryReplaceInput = ChatHistoryScopeInput & {
 
 export type GitDiffInput = {
   cwd: string
+}
+
+export type FileTreeInput = {
+  cwd: string
+  relativePath?: string
+}
+
+export type FileTreeSearchInput = {
+  cwd: string
+  query: string
+  limit?: number
+}
+
+export type FileReadInput = {
+  cwd: string
+  path: string
+  maxBytes?: number
+}
+
+export type FileTreeEntry = {
+  name: string
+  path: string
+  type: 'file' | 'directory'
+}
+
+export type FileReadResult = {
+  path: string
+  content: string
+  truncated: boolean
 }
 
 export type GitDiffHunk = {

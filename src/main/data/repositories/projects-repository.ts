@@ -3,7 +3,8 @@ import { basename } from 'node:path'
 import type {
   CreateProjectInput,
   DeleteProjectInput,
-  ProjectRecord
+  ProjectRecord,
+  UpdateProjectInput
 } from '../../../shared/ipc/types'
 import { SqliteService } from '../sqlite'
 
@@ -84,6 +85,24 @@ export class ProjectsRepository {
       rootPath: row.root_path,
       createdAt: row.created_at
     }
+  }
+
+  update(input: UpdateProjectInput): ProjectRecord | undefined {
+    const normalizedName = input.name.trim()
+    if (!normalizedName) {
+      return undefined
+    }
+
+    const result = this.sqlite
+      .instance()
+      .prepare('UPDATE projects SET name = ? WHERE id = ?')
+      .run(normalizedName, input.projectId)
+
+    if (result.changes <= 0) {
+      return undefined
+    }
+
+    return this.get(input.projectId)
   }
 
   delete(input: DeleteProjectInput): boolean {

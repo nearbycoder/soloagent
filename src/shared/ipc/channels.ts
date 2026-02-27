@@ -11,6 +11,7 @@ export const ipcChannels = {
   project: {
     create: 'project:create',
     list: 'project:list',
+    update: 'project:update',
     delete: 'project:delete',
     select: 'project:select',
     current: 'project:current'
@@ -45,6 +46,9 @@ export const ipcChannels = {
     metrics: 'app:metrics',
     logs: 'app:logs',
     gitDiff: 'app:git:diff',
+    fileTree: 'app:file-tree',
+    fileTreeSearch: 'app:file-tree:search',
+    fileRead: 'app:file-read',
     platform: 'app:platform',
     windowMinimize: 'app:window:minimize',
     windowMaximize: 'app:window:maximize',

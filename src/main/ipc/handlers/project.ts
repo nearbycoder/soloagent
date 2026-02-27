@@ -13,6 +13,11 @@ const deleteSchema = z.object({
   projectId: z.string().uuid()
 })
 
+const updateSchema = z.object({
+  projectId: z.string().uuid(),
+  name: z.string().trim().min(1).max(120)
+})
+
 const selectSchema = z.object({
   projectId: z.string().uuid().optional()
 })
@@ -26,6 +31,13 @@ export function registerProjectHandlers(context: IpcContext): void {
   )
 
   ipcMain.handle(ipcChannels.project.list, () => safeInvoke(() => context.projects.list()))
+
+  ipcMain.handle(ipcChannels.project.update, (_, rawInput) =>
+    safeInvoke(() => {
+      const input = updateSchema.parse(rawInput)
+      return context.projects.update(input)
+    })
+  )
 
   ipcMain.handle(ipcChannels.project.delete, (_, rawInput) =>
     safeInvoke(() => {

@@ -799,6 +799,8 @@ function AssistantChatSession({
   const [historyReady, setHistoryReady] = useState(false)
   const [historyError, setHistoryError] = useState<string | null>(null)
   const [liveToolCalls, setLiveToolCalls] = useState<ChatToolCall[]>([])
+  const [activeAssistantMessageId, setActiveAssistantMessageId] = useState<string | null>(null)
+  const [activeToolMessageId, setActiveToolMessageId] = useState<string | null>(null)
   const messageViewportRef = useRef<HTMLDivElement | null>(null)
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null)
   const activeRequestIdRef = useRef<string | null>(null)
@@ -815,6 +817,8 @@ function AssistantChatSession({
         const requestId = createRequestId()
         activeRequestIdRef.current = requestId
         setLiveToolCalls([])
+        setActiveToolMessageId(null)
+        setActiveAssistantMessageId(null)
         liveToolCallsRef.current = []
         const abortRequest = (): void => {
           void window.api.chat.abort({ requestId })
@@ -863,6 +867,7 @@ function AssistantChatSession({
           if (resolvedToolCalls.length > 0) {
             const toolMessageId = `tools-${Date.now()}`
             const toolContent = formatToolCallsMessage(resolvedToolCalls)
+            setActiveToolMessageId(toolMessageId)
             yield {
               type: 'TEXT_MESSAGE_START',
               messageId: toolMessageId,
@@ -893,6 +898,7 @@ function AssistantChatSession({
             timestamp: now,
             model
           }
+          setActiveAssistantMessageId(messageId)
 
           if (assistantText.length > 0) {
             const chunks = chunkText(assistantText, STREAM_CHUNK_SIZE)
@@ -943,8 +949,12 @@ function AssistantChatSession({
           if (activeRequestIdRef.current === requestId) {
             activeRequestIdRef.current = null
           }
-          setLiveToolCalls([])
-          liveToolCallsRef.current = []
+          if (abortSignal?.aborted) {
+            setActiveAssistantMessageId(null)
+            setLiveToolCalls([])
+            liveToolCallsRef.current = []
+            setActiveToolMessageId(null)
+          }
           abortSignal?.removeEventListener('abort', abortRequest)
         }
       }
@@ -969,8 +979,34 @@ function AssistantChatSession({
       })),
     [messages]
   )
+  const hasPersistedToolTraceForActiveRun = useMemo(() => {
+    if (!activeToolMessageId) {
+      return false
+    }
+    return messageItems.some((item) => item.id === activeToolMessageId && item.isToolTrace)
+  }, [activeToolMessageId, messageItems])
+  const hasToolTraceAfterLatestUser = useMemo(() => {
+    let latestUserIndex = -1
+    for (let index = 0; index < messageItems.length; index += 1) {
+      if (messageItems[index]?.role === 'user') {
+        latestUserIndex = index
+      }
+    }
+
+    for (let index = latestUserIndex + 1; index < messageItems.length; index += 1) {
+      if (messageItems[index]?.isToolTrace) {
+        return true
+      }
+    }
+
+    return false
+  }, [messageItems])
   const liveToolItem = useMemo<LiveToolRenderItem | null>(() => {
-    if (!isLoading || liveToolCalls.length === 0) {
+    if (
+      liveToolCalls.length === 0 ||
+      hasPersistedToolTraceForActiveRun ||
+      (!isLoading && hasToolTraceAfterLatestUser)
+    ) {
       return null
     }
 
@@ -979,10 +1015,44 @@ function AssistantChatSession({
       kind: 'live-tools',
       payload: buildToolTracePayload(liveToolCalls)
     }
-  }, [isLoading, liveToolCalls])
+  }, [hasPersistedToolTraceForActiveRun, hasToolTraceAfterLatestUser, isLoading, liveToolCalls])
   const renderItems = useMemo<ChatRenderItem[]>(
-    () => [...messageItems, ...(liveToolItem ? [liveToolItem] : [])],
-    [liveToolItem, messageItems]
+    () => {
+      if (!liveToolItem) {
+        return messageItems
+      }
+
+      const insertBeforeIndexById =
+        activeAssistantMessageId !== null
+          ? messageItems.findIndex((item) => item.id === activeAssistantMessageId)
+          : -1
+
+      let fallbackAssistantIndex = -1
+      for (let index = messageItems.length - 1; index >= 0; index -= 1) {
+        const item = messageItems[index]
+        if (!item) {
+          continue
+        }
+        if (item.role === 'assistant' && !item.isToolTrace) {
+          fallbackAssistantIndex = index
+          break
+        }
+      }
+
+      const insertBeforeIndex =
+        insertBeforeIndexById >= 0 ? insertBeforeIndexById : fallbackAssistantIndex
+
+      if (insertBeforeIndex < 0) {
+        return [...messageItems, liveToolItem]
+      }
+
+      return [
+        ...messageItems.slice(0, insertBeforeIndex),
+        liveToolItem,
+        ...messageItems.slice(insertBeforeIndex)
+      ]
+    },
+    [activeAssistantMessageId, liveToolItem, messageItems]
   )
   const shouldVirtualize = shouldVirtualizeChatMessages(renderItems.length)
   const rowVirtualizer = useVirtualizer({

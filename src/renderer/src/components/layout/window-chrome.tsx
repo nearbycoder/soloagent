@@ -8,10 +8,26 @@ type WindowChromeProps = {
   rightCollapsed: boolean
   terminalCollapsed: boolean
   isDarkMode: boolean
+  activeAccentColor?: string
   onToggleLeft: () => void
   onToggleRight: () => void
   onToggleTerminal: () => void
   onToggleTheme: (checked: boolean) => void
+}
+
+function hexToRgb(value: string): { r: number; g: number; b: number } | null {
+  if (!value) {
+    return null
+  }
+  const hex = value.trim().replace('#', '')
+  if (!/^[0-9a-f]{6}$/i.test(hex)) {
+    return null
+  }
+  return {
+    r: Number.parseInt(hex.slice(0, 2), 16),
+    g: Number.parseInt(hex.slice(2, 4), 16),
+    b: Number.parseInt(hex.slice(4, 6), 16)
+  }
 }
 
 export function WindowChrome({
@@ -19,6 +35,7 @@ export function WindowChrome({
   rightCollapsed,
   terminalCollapsed,
   isDarkMode,
+  activeAccentColor,
   onToggleLeft,
   onToggleRight,
   onToggleTerminal,
@@ -51,8 +68,16 @@ export function WindowChrome({
     }
   }
 
+  const accentRgb = activeAccentColor ? hexToRgb(activeAccentColor) : null
+  const tintOverlay = accentRgb
+    ? `linear-gradient(rgba(${accentRgb.r}, ${accentRgb.g}, ${accentRgb.b}, 0.17), rgba(${accentRgb.r}, ${accentRgb.g}, ${accentRgb.b}, 0.17))`
+    : undefined
+
   return (
-    <header className="chrome-drag flex h-10 items-center justify-between border-b border-border/80 bg-card/95 px-3">
+    <header
+      className="chrome-drag flex h-10 items-center justify-between border-b border-border/80 bg-card/95 px-3"
+      style={{ backgroundImage: tintOverlay }}
+    >
       <div className="chrome-no-drag flex items-center gap-2">
         {platform === 'darwin' ? (
           <div className="flex items-center gap-2 pl-1">
@@ -80,7 +105,7 @@ export function WindowChrome({
         )}
       </div>
 
-      <div className="pointer-events-none text-xs text-muted-foreground">
+      <div className="pointer-events-none text-sm font-semibold tracking-wide text-foreground/90">
         SoloAgent
       </div>
 
