@@ -3,6 +3,7 @@ import {
   ChevronLeft,
   ChevronRight,
   FolderPlus,
+  LoaderCircle,
   Plus,
   Settings2,
   Trash2,
@@ -585,6 +586,13 @@ export function DashboardLayout(): React.JSX.Element {
     !gitComposerBusy &&
     Boolean(gitDiff?.clean) &&
     showPrComposer
+  const gitComposerProgressLabel = gitCommitSubmitting
+    ? 'Thinking about your commit...'
+    : gitPrSubmitting
+      ? 'Thinking about your pull request...'
+      : gitPushSubmitting
+        ? 'Pushing latest main changes...'
+        : ''
 
   const getDiffFileKey = useCallback(
     (path: string) => `${selectedProject?.id || HOME_PROJECT_SCOPE}:${path}`,
@@ -2533,7 +2541,13 @@ export function DashboardLayout(): React.JSX.Element {
                                     : 'border-border/70 bg-muted/40 text-muted-foreground'
                               }`}
                             >
-                              {gitComposerStatus}
+                              {gitComposerBusy ? (
+                                <div className="flex items-center gap-1.5">
+                                  <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                                  <span className="min-w-0 truncate">{gitComposerProgressLabel}</span>
+                                </div>
+                              ) : null}
+                              <div>{gitComposerStatus}</div>
                             </div>
                           ) : null}
                         </div>
