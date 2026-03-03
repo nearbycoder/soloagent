@@ -2448,7 +2448,7 @@ export function DashboardLayout(): React.JSX.Element {
                                     type="button"
                                     size="sm"
                                     variant="secondary"
-                                    className="h-7"
+                                    className="h-7 max-w-[7rem] min-w-0 truncate"
                                     onClick={() => void handleGitPush()}
                                     disabled={!canPushMainInComposer}
                                   >
@@ -2458,7 +2458,7 @@ export function DashboardLayout(): React.JSX.Element {
                                 <Button
                                   type="button"
                                   size="sm"
-                                  className="h-7"
+                                  className="h-7 max-w-[7rem] min-w-0 truncate"
                                   onClick={() => void handleGitCommit()}
                                   disabled={!canCommitInComposer || Boolean(gitDiff.clean)}
                                 >
