@@ -2462,7 +2462,7 @@ export function DashboardLayout(): React.JSX.Element {
 
                           {gitComposerStatus ? (
                             <div
-                              className={`rounded-md border p-2 text-[11px] ${
+                              className={`max-w-full overflow-hidden whitespace-pre-wrap break-all rounded-md border p-2 text-[11px] ${
                                 gitComposerStatusTone === 'error'
                                   ? 'border-destructive/40 bg-destructive/10 text-destructive'
                                   : gitComposerStatusTone === 'success'
