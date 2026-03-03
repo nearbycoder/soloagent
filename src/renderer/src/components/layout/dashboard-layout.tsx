@@ -2440,15 +2440,19 @@ export function DashboardLayout(): React.JSX.Element {
                           </div>
 
                           <div className="space-y-1.5 rounded-md border border-border/70 p-2">
-                            <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
                               <div className="text-xs font-medium">Commit</div>
-                              <div className="flex items-center gap-1.5">
+                              <div
+                                className={`ml-auto grid min-w-0 gap-1.5 ${
+                                  isMainGitBranch ? 'w-[13rem] max-w-full grid-cols-2' : 'w-[7rem] max-w-full grid-cols-1'
+                                }`}
+                              >
                                 {isMainGitBranch ? (
                                   <Button
                                     type="button"
                                     size="sm"
                                     variant="secondary"
-                                    className="h-7 max-w-[7rem] min-w-0 truncate"
+                                    className="h-7 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
                                     onClick={() => void handleGitPush()}
                                     disabled={!canPushMainInComposer}
                                   >
@@ -2458,7 +2462,7 @@ export function DashboardLayout(): React.JSX.Element {
                                 <Button
                                   type="button"
                                   size="sm"
-                                  className="h-7 max-w-[7rem] min-w-0 truncate"
+                                  className="h-7 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
                                   onClick={() => void handleGitCommit()}
                                   disabled={!canCommitInComposer || Boolean(gitDiff.clean)}
                                 >
