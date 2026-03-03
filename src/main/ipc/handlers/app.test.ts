@@ -1,6 +1,19 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
+vi.mock('electron', () => ({
+  BrowserWindow: {
+    getFocusedWindow: () => null
+  },
+  dialog: {
+    showOpenDialog: vi.fn()
+  },
+  ipcMain: {
+    handle: vi.fn()
+  }
+}))
 import {
   assertCleanWorkingTree,
+  assertHeadDiffersFromBaseBranch,
   assertNotDetachedHead,
   mapGhExecutionError,
   parsePrUrl,
@@ -37,6 +50,10 @@ describe('app handler git workflow helpers', () => {
 
     expect(() => assertNotDetachedHead('feature/test')).not.toThrow()
     expect(() => assertNotDetachedHead('HEAD')).toThrow('Cannot create PR from detached HEAD.')
+    expect(() => assertHeadDiffersFromBaseBranch('feature/test', 'main')).not.toThrow()
+    expect(() => assertHeadDiffersFromBaseBranch('main', 'main')).toThrow(
+      'Switch to a feature branch before creating a PR.'
+    )
   })
 
   it('maps gh missing/auth errors to actionable messages', () => {
@@ -47,5 +64,11 @@ describe('app handler git workflow helpers', () => {
     expect(
       mapGhExecutionError({ stderr: 'You are not logged into any GitHub hosts.' }).message
     ).toContain('gh auth login')
+
+    expect(
+      mapGhExecutionError({
+        stderr: 'head branch "main" is the same as base branch "main", cannot create a pull request'
+      }).message
+    ).toContain('Switch to a feature branch')
   })
 })

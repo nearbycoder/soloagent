@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { open, readdir } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron'
@@ -71,7 +71,7 @@ type MutableGitDiffFileChange = GitDiffFileChange & {
 type FileTreeGitStatus = NonNullable<FileTreeEntry['gitStatus']>
 
 type ChildProcessFailure = {
-  code?: string
+  code?: string | number
   status?: number
   stdout?: string | Buffer
   stderr?: string | Buffer
@@ -113,6 +113,15 @@ export function mapGhExecutionError(error: unknown): Error {
 
   const output = getChildProcessOutput(error)
   const normalized = output.toLowerCase()
+  const sameBranchMatch = output.match(
+    /head branch "([^"]+)" is the same as base branch "([^"]+)"/i
+  )
+  if (sameBranchMatch?.[1] && sameBranchMatch?.[2]) {
+    return new Error(
+      `Current branch "${sameBranchMatch[1]}" matches base "${sameBranchMatch[2]}". Switch to a feature branch before creating a PR.`
+    )
+  }
+
   if (
     normalized.includes('not logged in') ||
     normalized.includes('not logged into any hosts') ||
@@ -142,6 +151,41 @@ function runGit(cwd: string, args: string[]): string {
   }
 }
 
+function execFileTextAsync(command: string, args: string[], cwd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      command,
+      args,
+      {
+        cwd,
+        encoding: 'utf8',
+        maxBuffer: 16 * 1024 * 1024
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const failure = error as ChildProcessFailure
+          failure.stdout = typeof stdout === 'string' ? stdout : undefined
+          failure.stderr = typeof stderr === 'string' ? stderr : undefined
+          reject(failure)
+          return
+        }
+        resolve(typeof stdout === 'string' ? stdout : '')
+      }
+    )
+  })
+}
+
+async function runGitAsync(cwd: string, args: string[]): Promise<string> {
+  try {
+    return await execFileTextAsync('git', args, cwd)
+  } catch (error) {
+    const message =
+      trimToUndefined(getChildProcessOutput(error)) ||
+      'Git command failed for the selected project.'
+    throw new Error(message)
+  }
+}
+
 function runGitOptional(cwd: string, args: string[]): string {
   try {
     return runGit(cwd, args)
@@ -150,14 +194,17 @@ function runGitOptional(cwd: string, args: string[]): string {
   }
 }
 
-function runGh(cwd: string, args: string[]): string {
+async function runGitOptionalAsync(cwd: string, args: string[]): Promise<string> {
   try {
-    return execFileSync('gh', args, {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      maxBuffer: 16 * 1024 * 1024
-    })
+    return await runGitAsync(cwd, args)
+  } catch {
+    return ''
+  }
+}
+
+async function runGhAsync(cwd: string, args: string[]): Promise<string> {
+  try {
+    return await execFileTextAsync('gh', args, cwd)
   } catch (error) {
     throw mapGhExecutionError(error)
   }
@@ -196,16 +243,13 @@ function runGitAllowingStatus(cwd: string, args: string[], allowedStatuses: numb
   }
 }
 
-function gitRefExists(cwd: string, ref: string): boolean {
+async function gitRefExistsAsync(cwd: string, ref: string): Promise<boolean> {
   try {
-    execFileSync('git', ['show-ref', '--verify', '--quiet', ref], {
-      cwd,
-      stdio: 'ignore'
-    })
+    await execFileTextAsync('git', ['show-ref', '--verify', '--quiet', ref], cwd)
     return true
   } catch (error) {
     const maybeError = error as ChildProcessFailure
-    if (maybeError?.status === 1) {
+    if (maybeError?.status === 1 || maybeError?.code === 1) {
       return false
     }
     const message =
@@ -284,6 +328,17 @@ export function assertCleanWorkingTree(statusOutput: string): void {
 export function assertNotDetachedHead(branch: string): void {
   if (branch.trim() === 'HEAD') {
     throw new Error('Cannot create PR from detached HEAD.')
+  }
+}
+
+export function assertHeadDiffersFromBaseBranch(headBranch: string, baseBranch?: string): void {
+  if (!baseBranch) {
+    return
+  }
+  if (headBranch.trim() === baseBranch.trim()) {
+    throw new Error(
+      `Current branch "${headBranch}" matches base "${baseBranch}". Switch to a feature branch before creating a PR.`
+    )
   }
 }
 
@@ -687,20 +742,6 @@ function buildGitDiffFilePatch(cwd: string, path: string, status?: string): GitD
   }
 }
 
-function toAutofillDiffSummary(summary: GitDiffSummary): GitAutofillDiffSummary {
-  return {
-    changedFiles: summary.changedFiles,
-    totalAdditions: summary.totalAdditions,
-    totalDeletions: summary.totalDeletions,
-    files: summary.files.map((file) => ({
-      path: file.path,
-      status: file.status,
-      additions: file.additions,
-      deletions: file.deletions
-    }))
-  }
-}
-
 function buildDiffSummaryFromNumstatOutput(numstatOutput: string): GitAutofillDiffSummary {
   const files: GitAutofillDiffSummary['files'] = []
   const lines = numstatOutput
@@ -739,55 +780,151 @@ function buildDiffSummaryFromNumstatOutput(numstatOutput: string): GitAutofillDi
   }
 }
 
-function buildWorkingTreeAutofillContext(cwd: string): GitAutofillContext {
-  const summary = buildGitDiffSummary(cwd)
+function buildDiffSummaryFromWorkingTree(
+  statusOutput: string,
+  numstatStaged: string,
+  numstatUnstaged: string
+): GitAutofillDiffSummary {
+  const filesByPath = new Map<
+    string,
+    {
+      path: string
+      status?: string
+      additions: number
+      deletions: number
+    }
+  >()
+
+  const ensureSummaryFile = (
+    path: string,
+    status = 'modified'
+  ): { path: string; status?: string; additions: number; deletions: number } => {
+    const existing = filesByPath.get(path)
+    if (existing) {
+      if ((!existing.status || existing.status === 'modified') && status !== 'modified') {
+        existing.status = status
+      }
+      return existing
+    }
+
+    const created = { path, status, additions: 0, deletions: 0 }
+    filesByPath.set(path, created)
+    return created
+  }
+
+  for (const line of statusOutput.split('\n').map((entry) => entry.trimEnd())) {
+    if (!line || line.startsWith('## ')) {
+      continue
+    }
+    const code = line.slice(0, 2)
+    if (code === '!!') {
+      continue
+    }
+    const rawPath = line.slice(3).trim()
+    const normalizedPath = rawPath.includes(' -> ')
+      ? rawPath.split(' -> ').at(-1)?.trim() || rawPath
+      : rawPath
+    if (!normalizedPath) {
+      continue
+    }
+    ensureSummaryFile(normalizedPath, normalizeStatus(code))
+  }
+
+  const applyNumstat = (numstatOutput: string): void => {
+    for (const line of numstatOutput
+      .split('\n')
+      .map((entry) => entry.trim())
+      .filter(Boolean)) {
+      const [rawAdditions, rawDeletions, ...pathParts] = line.split('\t')
+      const path = pathParts.join('\t').trim()
+      if (!path) {
+        continue
+      }
+      const entry = ensureSummaryFile(path)
+      const additions = rawAdditions === '-' ? 0 : Number.parseInt(rawAdditions, 10) || 0
+      const deletions = rawDeletions === '-' ? 0 : Number.parseInt(rawDeletions, 10) || 0
+      entry.additions += additions
+      entry.deletions += deletions
+    }
+  }
+
+  applyNumstat(numstatStaged)
+  applyNumstat(numstatUnstaged)
+
+  const files = [...filesByPath.values()].sort((left, right) => left.path.localeCompare(right.path))
+  const totalAdditions = files.reduce((sum, file) => sum + file.additions, 0)
+  const totalDeletions = files.reduce((sum, file) => sum + file.deletions, 0)
+
   return {
-    cwd,
-    branch: summary.branch,
-    statusOutput: runGit(cwd, ['status', '--porcelain=v1', '--branch', '--untracked-files=all']),
-    diffSummary: toAutofillDiffSummary(summary),
-    stagedPatch: runGitOptional(cwd, ['diff', '--cached', '--unified=3', '--no-color']),
-    unstagedPatch: runGitOptional(cwd, ['diff', '--unified=3', '--no-color']),
-    latestCommitMessage: runGitOptional(cwd, ['log', '-1', '--pretty=%B']).trim(),
-    latestCommitPatch: runGitOptional(cwd, [
-      'show',
-      '--format=',
-      '--unified=3',
-      '--no-color',
-      'HEAD'
-    ])
+    changedFiles: files.length,
+    totalAdditions,
+    totalDeletions,
+    files
   }
 }
 
-function buildHeadAutofillContext(cwd: string, branch: string): GitAutofillContext {
-  const headNumstat = runGitOptional(cwd, ['show', '--numstat', '--format=', 'HEAD'])
-  const diffSummary = buildDiffSummaryFromNumstatOutput(headNumstat)
+async function buildWorkingTreeAutofillContext(cwd: string): Promise<GitAutofillContext> {
+  const statusOutput = await runGitAsync(cwd, [
+    'status',
+    '--porcelain=v1',
+    '--branch',
+    '--untracked-files=all'
+  ])
+  const branchLine = statusOutput
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .find((line) => line.startsWith('## '))
+  const { branch } = parseBranchStatus(branchLine)
+  const [
+    numstatStaged,
+    numstatUnstaged,
+    stagedPatch,
+    unstagedPatch,
+    latestCommitMessage,
+    latestCommitPatch
+  ] = await Promise.all([
+    runGitAsync(cwd, ['diff', '--cached', '--numstat']),
+    runGitAsync(cwd, ['diff', '--numstat']),
+    runGitOptionalAsync(cwd, ['diff', '--cached', '--unified=3', '--no-color']),
+    runGitOptionalAsync(cwd, ['diff', '--unified=3', '--no-color']),
+    runGitOptionalAsync(cwd, ['log', '-1', '--pretty=%B']),
+    runGitOptionalAsync(cwd, ['show', '--format=', '--unified=3', '--no-color', 'HEAD'])
+  ])
 
   return {
     cwd,
     branch,
-    statusOutput: runGitOptional(cwd, [
-      'status',
-      '--porcelain=v1',
-      '--branch',
-      '--untracked-files=all'
-    ]),
-    diffSummary,
-    latestCommitMessage: runGitOptional(cwd, ['log', '-1', '--pretty=%B']).trim(),
-    latestCommitPatch: runGitOptional(cwd, [
-      'show',
-      '--format=',
-      '--unified=3',
-      '--no-color',
-      'HEAD'
-    ]),
+    statusOutput,
+    diffSummary: buildDiffSummaryFromWorkingTree(statusOutput, numstatStaged, numstatUnstaged),
+    stagedPatch,
+    unstagedPatch,
+    latestCommitMessage: latestCommitMessage.trim(),
+    latestCommitPatch
+  }
+}
+
+async function buildHeadAutofillContext(cwd: string, branch: string): Promise<GitAutofillContext> {
+  const [headNumstat, statusOutput, latestCommitMessage, latestCommitPatch] = await Promise.all([
+    runGitOptionalAsync(cwd, ['show', '--numstat', '--format=', 'HEAD']),
+    runGitOptionalAsync(cwd, ['status', '--porcelain=v1', '--branch', '--untracked-files=all']),
+    runGitOptionalAsync(cwd, ['log', '-1', '--pretty=%B']),
+    runGitOptionalAsync(cwd, ['show', '--format=', '--unified=3', '--no-color', 'HEAD'])
+  ])
+
+  return {
+    cwd,
+    branch,
+    statusOutput,
+    diffSummary: buildDiffSummaryFromNumstatOutput(headNumstat),
+    latestCommitMessage: latestCommitMessage.trim(),
+    latestCommitPatch,
     stagedPatch: '',
     unstagedPatch: ''
   }
 }
 
-function resolvePushRemoteForBranch(cwd: string): string {
-  const upstreamRef = runGitOptional(cwd, [
+async function resolvePushRemoteForBranch(cwd: string): Promise<string> {
+  const upstreamRef = await runGitOptionalAsync(cwd, [
     'rev-parse',
     '--abbrev-ref',
     '--symbolic-full-name',
@@ -796,24 +933,34 @@ function resolvePushRemoteForBranch(cwd: string): string {
   return selectPushRemote(upstreamRef)
 }
 
-function resolveBaseBranchForRemote(cwd: string, remote: string): string | undefined {
-  const remoteHeadRef = runGitOptional(cwd, [
+async function resolveBaseBranchForRemote(
+  cwd: string,
+  remote: string
+): Promise<string | undefined> {
+  const remoteHeadRef = await runGitOptionalAsync(cwd, [
     'symbolic-ref',
     '--quiet',
     '--short',
     `refs/remotes/${remote}/HEAD`
   ])
 
-  const hasMain =
-    gitRefExists(cwd, 'refs/heads/main') || gitRefExists(cwd, `refs/remotes/${remote}/main`)
-  const hasMaster =
-    gitRefExists(cwd, 'refs/heads/master') || gitRefExists(cwd, `refs/remotes/${remote}/master`)
+  const [hasLocalMain, hasRemoteMain, hasLocalMaster, hasRemoteMaster] = await Promise.all([
+    gitRefExistsAsync(cwd, 'refs/heads/main'),
+    gitRefExistsAsync(cwd, `refs/remotes/${remote}/main`),
+    gitRefExistsAsync(cwd, 'refs/heads/master'),
+    gitRefExistsAsync(cwd, `refs/remotes/${remote}/master`)
+  ])
 
-  return resolveBaseBranchCandidate(remoteHeadRef, remote, hasMain, hasMaster)
+  return resolveBaseBranchCandidate(
+    remoteHeadRef,
+    remote,
+    hasLocalMain || hasRemoteMain,
+    hasLocalMaster || hasRemoteMaster
+  )
 }
 
-function ensureGhAuthenticated(cwd: string): void {
-  runGh(cwd, ['auth', 'status'])
+async function ensureGhAuthenticated(cwd: string): Promise<void> {
+  await runGhAsync(cwd, ['auth', 'status'])
 }
 
 async function executeGitCommit(
@@ -821,12 +968,12 @@ async function executeGitCommit(
   message: string | undefined,
   onWarn?: (message: string) => void
 ): Promise<GitCommitResult> {
-  const statusOutput = runGit(cwd, ['status', '--porcelain=v1']).trim()
+  const statusOutput = (await runGitAsync(cwd, ['status', '--porcelain=v1'])).trim()
   if (!statusOutput) {
     throw new Error('No local changes to commit.')
   }
 
-  const context = buildWorkingTreeAutofillContext(cwd)
+  const context = await buildWorkingTreeAutofillContext(cwd)
   const autofill = await resolveGitAutofill(
     {
       commitMessage: message,
@@ -839,9 +986,9 @@ async function executeGitCommit(
     }
   )
 
-  runGit(cwd, ['add', '-A'])
-  runGit(cwd, ['commit', '-m', autofill.commitMessage])
-  const commitHash = runGit(cwd, ['rev-parse', '--short', 'HEAD']).trim()
+  await runGitAsync(cwd, ['add', '-A'])
+  await runGitAsync(cwd, ['commit', '-m', autofill.commitMessage])
+  const commitHash = (await runGitAsync(cwd, ['rev-parse', '--short', 'HEAD'])).trim()
 
   return {
     commitMessage: autofill.commitMessage,
@@ -855,17 +1002,18 @@ async function executeGitCreatePr(
   body: string | undefined,
   onWarn?: (message: string) => void
 ): Promise<GitCreatePrResult> {
-  assertCleanWorkingTree(runGit(cwd, ['status', '--porcelain=v1']).trim())
+  assertCleanWorkingTree((await runGitAsync(cwd, ['status', '--porcelain=v1'])).trim())
 
-  const branch = runGit(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()
+  const branch = (await runGitAsync(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
   assertNotDetachedHead(branch)
 
-  const remote = resolvePushRemoteForBranch(cwd)
-  runGit(cwd, ['push', '-u', remote, 'HEAD'])
+  const remote = await resolvePushRemoteForBranch(cwd)
+  await runGitAsync(cwd, ['push', '-u', remote, 'HEAD'])
 
-  ensureGhAuthenticated(cwd)
-  const baseBranch = resolveBaseBranchForRemote(cwd, remote)
-  const context = buildHeadAutofillContext(cwd, branch)
+  await ensureGhAuthenticated(cwd)
+  const baseBranch = await resolveBaseBranchForRemote(cwd, remote)
+  assertHeadDiffersFromBaseBranch(branch, baseBranch)
+  const context = await buildHeadAutofillContext(cwd, branch)
   const autofill = await resolveGitAutofill(
     {
       commitMessage: context.latestCommitMessage || 'chore: update project files',
@@ -882,7 +1030,7 @@ async function executeGitCreatePr(
   if (baseBranch) {
     args.push('--base', baseBranch)
   }
-  const output = runGh(cwd, args)
+  const output = await runGhAsync(cwd, args)
 
   return {
     title: autofill.prTitle,

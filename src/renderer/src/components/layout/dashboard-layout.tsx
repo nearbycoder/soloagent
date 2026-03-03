@@ -539,8 +539,13 @@ export function DashboardLayout(): React.JSX.Element {
   const hasMultipleDiffFiles = gitDiffFiles.length > 1
   const gitComposerBusy = gitCommitSubmitting || gitPrSubmitting
   const canCommitInComposer = Boolean(selectedProject?.rootPath) && !gitComposerBusy
+  const isMainGitBranch = gitDiff?.branch === 'main'
+  const showPrComposer = !isMainGitBranch
   const canCreatePrInComposer =
-    Boolean(selectedProject?.rootPath) && !gitComposerBusy && Boolean(gitDiff?.clean)
+    Boolean(selectedProject?.rootPath) &&
+    !gitComposerBusy &&
+    Boolean(gitDiff?.clean) &&
+    showPrComposer
 
   const getDiffFileKey = useCallback(
     (path: string) => `${selectedProject?.id || HOME_PROJECT_SCOPE}:${path}`,
@@ -2391,7 +2396,7 @@ export function DashboardLayout(): React.JSX.Element {
                         </div>
                         <div className="space-y-2 rounded-md border border-border/70 p-2">
                           <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                            Commit & PR Composer
+                            {showPrComposer ? 'Commit & PR Composer' : 'Commit Composer'}
                           </div>
 
                           <div className="space-y-1.5 rounded-md border border-border/70 p-2">
@@ -2420,38 +2425,40 @@ export function DashboardLayout(): React.JSX.Element {
                             </div>
                           </div>
 
-                          <div className="space-y-1.5 rounded-md border border-border/70 p-2">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="text-xs font-medium">Pull Request</div>
-                              <Button
-                                type="button"
-                                size="sm"
-                                className="h-7"
-                                onClick={() => void handleGitCreatePr()}
-                                disabled={!canCreatePrInComposer}
-                              >
-                                {gitPrSubmitting ? 'Creating...' : 'Create PR'}
-                              </Button>
+                          {showPrComposer ? (
+                            <div className="space-y-1.5 rounded-md border border-border/70 p-2">
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="text-xs font-medium">Pull Request</div>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  className="h-7"
+                                  onClick={() => void handleGitCreatePr()}
+                                  disabled={!canCreatePrInComposer}
+                                >
+                                  {gitPrSubmitting ? 'Creating...' : 'Create PR'}
+                                </Button>
+                              </div>
+                              <input
+                                value={gitPrTitleDraft}
+                                onChange={(event) => setGitPrTitleDraft(event.target.value)}
+                                placeholder="PR title"
+                                disabled={gitComposerBusy}
+                                className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-60"
+                              />
+                              <textarea
+                                value={gitPrBodyDraft}
+                                onChange={(event) => setGitPrBodyDraft(event.target.value)}
+                                placeholder="PR description"
+                                disabled={gitComposerBusy}
+                                rows={5}
+                                className="w-full resize-y rounded-md border border-input bg-background px-2 py-1.5 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-60"
+                              />
+                              <div className="text-[11px] text-muted-foreground">
+                                Missing fields are auto-generated.
+                              </div>
                             </div>
-                            <input
-                              value={gitPrTitleDraft}
-                              onChange={(event) => setGitPrTitleDraft(event.target.value)}
-                              placeholder="PR title"
-                              disabled={gitComposerBusy}
-                              className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-60"
-                            />
-                            <textarea
-                              value={gitPrBodyDraft}
-                              onChange={(event) => setGitPrBodyDraft(event.target.value)}
-                              placeholder="PR description"
-                              disabled={gitComposerBusy}
-                              rows={5}
-                              className="w-full resize-y rounded-md border border-input bg-background px-2 py-1.5 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-60"
-                            />
-                            <div className="text-[11px] text-muted-foreground">
-                              Missing fields are auto-generated.
-                            </div>
-                          </div>
+                          ) : null}
 
                           {gitComposerStatus ? (
                             <div

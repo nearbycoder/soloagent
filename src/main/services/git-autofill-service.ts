@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { ensureShellPathInProcessEnv, resolveCommandExecutable } from './shell-env'
 
 const DEFAULT_CODEX_MODEL = 'gpt-5.3-codex'
@@ -10,6 +10,8 @@ const MAX_FILES_IN_PROMPT = 40
 const MAX_PR_BODY_FILES = 8
 const MAX_FILE_PATH_PREVIEW = 120
 const MAX_SUBJECT_LENGTH = 72
+const CODEX_AUTOFILL_TIMEOUT_MS = 45_000
+const CODEX_AUTOFILL_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 
 export type GitAutofillFileSummary = {
   path: string
@@ -332,9 +334,8 @@ function parseCodexPayload(raw: string): CodexAutofillPayload | undefined {
 async function runCodexPrompt(prompt: string, cwd: string): Promise<string> {
   ensureShellPathInProcessEnv()
   const codexCommand = resolveCommandExecutable('codex')
-  const result = spawnSync(
-    codexCommand,
-    [
+  return await new Promise((resolve, reject) => {
+    const args = [
       'exec',
       '--skip-git-repo-check',
       '--sandbox',
@@ -344,26 +345,75 @@ async function runCodexPrompt(prompt: string, cwd: string): Promise<string> {
       '-c',
       'model_reasoning_effort="low"',
       prompt
-    ],
-    {
+    ]
+    const child = spawn(codexCommand, args, {
       cwd,
       env: process.env,
-      encoding: 'utf8',
-      maxBuffer: 4 * 1024 * 1024,
-      timeout: 45_000
-    }
-  )
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
 
-  if (result.error) {
-    throw result.error
-  }
+    let stdout = ''
+    let stderr = ''
+    let stdoutBytes = 0
+    let stderrBytes = 0
+    let didTimeout = false
+    let didOverflow = false
 
-  if (result.status !== 0) {
-    const stderr = trimToUndefined(result.stderr)
-    throw new Error(stderr || `Codex autofill failed with exit code ${result.status}.`)
-  }
+    const timeout = setTimeout(() => {
+      didTimeout = true
+      child.kill('SIGTERM')
+    }, CODEX_AUTOFILL_TIMEOUT_MS)
 
-  return result.stdout || ''
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+      stdoutBytes += Buffer.byteLength(text)
+      if (stdoutBytes > CODEX_AUTOFILL_MAX_OUTPUT_BYTES) {
+        didOverflow = true
+        child.kill('SIGTERM')
+        return
+      }
+      stdout += text
+    })
+
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+      stderrBytes += Buffer.byteLength(text)
+      if (stderrBytes > CODEX_AUTOFILL_MAX_OUTPUT_BYTES) {
+        didOverflow = true
+        child.kill('SIGTERM')
+        return
+      }
+      stderr += text
+    })
+
+    child.once('error', (error) => {
+      clearTimeout(timeout)
+      reject(error)
+    })
+
+    child.once('close', (code) => {
+      clearTimeout(timeout)
+
+      if (didTimeout) {
+        reject(new Error('Codex autofill timed out after 45s.'))
+        return
+      }
+
+      if (didOverflow) {
+        reject(new Error('Codex autofill output exceeded size limit.'))
+        return
+      }
+
+      if (code !== 0) {
+        reject(
+          new Error(trimToUndefined(stderr) || `Codex autofill failed with exit code ${code}.`)
+        )
+        return
+      }
+
+      resolve(stdout)
+    })
+  })
 }
 
 export async function resolveGitAutofill(
