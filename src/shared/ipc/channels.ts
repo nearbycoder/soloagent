@@ -32,6 +32,7 @@ export const ipcChannels = {
   chat: {
     complete: 'chat:complete',
     abort: 'chat:abort',
+    suggestSpaceTitle: 'chat:space-title:suggest',
     uploadAttachment: 'chat:attachment:upload',
     resolveAttachment: 'chat:attachment:resolve',
     event: 'chat:event',

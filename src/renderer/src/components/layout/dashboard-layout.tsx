@@ -48,6 +48,8 @@ const DEFAULT_CENTER_TOP_PERCENT = 50
 const MIN_CENTER_TOP_PX = 140
 const MIN_CENTER_BOTTOM_PX = 180
 const CENTER_SPLITTER_PX = 6
+const DEFAULT_SPACE_NAME_PATTERN = /^Space \d+$/i
+const MAX_AUTO_SPACE_NAME_LENGTH = 52
 
 type SpaceDefinition = {
   id: string
@@ -236,6 +238,43 @@ function createSpace(index: number): SpaceDefinition {
     id: makeSpaceId(),
     name: `Space ${index}`
   }
+}
+
+function deriveAutoSpaceNameFromPrompt(prompt: string): string {
+  const compact = prompt
+    .replace(/\!\[[^\]]*\]\([^)]+\)/g, ' ')
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!compact) {
+    return 'New Task'
+  }
+
+  const withoutPrefix = compact
+    .replace(/^(please|can you|could you|can we|would you|help me|i need to|i want to|let'?s)\s+/i, '')
+    .trim()
+  const firstClause = (withoutPrefix.split(/[.!?]/)[0] || withoutPrefix).trim()
+  const normalized = firstClause
+    .replace(/[`*_#[\](){}<>]/g, ' ')
+    .replace(/[,:;]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!normalized) {
+    return 'New Task'
+  }
+
+  const firstWords = normalized.split(' ').slice(0, 8).join(' ')
+  const trimmed =
+    firstWords.length > MAX_AUTO_SPACE_NAME_LENGTH
+      ? firstWords.slice(0, MAX_AUTO_SPACE_NAME_LENGTH).replace(/\s+\S*$/, '')
+      : firstWords
+
+  const safe = trimmed.replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '').trim()
+  if (!safe) {
+    return 'New Task'
+  }
+
+  return safe[0]?.toUpperCase() + safe.slice(1)
 }
 
 function getDefaultTerminalTitle(index: number): string {
@@ -551,29 +590,38 @@ export function DashboardLayout(): React.JSX.Element {
       const previousByPath = new Map((current?.files || []).map((file) => [file.path, file]))
       const mergedFiles = response.data.files.map((file) => {
         const previous = previousByPath.get(file.path)
-        if (!previous || !previous.patch || previous.patch.trim().length === 0) {
+        if (!previous) {
           return file
         }
-        if (file.patch && file.patch.trim().length > 0) {
+
+        const previousHasPatch = Boolean(previous.patch && previous.patch.trim().length > 0)
+        const incomingHasPatch = Boolean(file.patch && file.patch.trim().length > 0)
+        if (!previousHasPatch || incomingHasPatch) {
           return file
         }
-        const isSameDiffFingerprint =
-          previous.status === file.status &&
-          previous.additions === file.additions &&
-          previous.deletions === file.deletions
-        if (!isSameDiffFingerprint) {
+
+        if (previous.status !== file.status) {
           return file
         }
+
+        const preserveCounts = file.additions === 0 && file.deletions === 0
         return {
           ...file,
+          additions: preserveCounts ? previous.additions : file.additions,
+          deletions: preserveCounts ? previous.deletions : file.deletions,
           patch: previous.patch,
           hunks: file.hunks.length > 0 ? file.hunks : previous.hunks
         }
       })
 
+      const totalAdditions = mergedFiles.reduce((sum, file) => sum + file.additions, 0)
+      const totalDeletions = mergedFiles.reduce((sum, file) => sum + file.deletions, 0)
+
       return {
         ...response.data,
-        files: mergedFiles
+        files: mergedFiles,
+        totalAdditions,
+        totalDeletions
       }
     })
     setGitDiffError('')
@@ -747,10 +795,8 @@ export function DashboardLayout(): React.JSX.Element {
         changed = true
         return {
           ...file,
-          additions:
-            file.additions === 0 && file.deletions === 0 ? patchedFile.additions : file.additions,
-          deletions:
-            file.additions === 0 && file.deletions === 0 ? patchedFile.deletions : file.deletions,
+          additions: patchedFile.additions,
+          deletions: patchedFile.deletions,
           hunks: patchedFile.hunks.length > 0 ? patchedFile.hunks : file.hunks,
           patch: patchedFile.patch
         }
@@ -1180,6 +1226,71 @@ export function DashboardLayout(): React.JSX.Element {
       })
     },
     []
+  )
+
+  const applyAutoSpaceName = useCallback((scopeKey: string, spaceId: string, nextName: string): void => {
+    setSpaceState((state) => {
+      const scopedSpaces = state.spacesByScope[scopeKey] || []
+      let changed = false
+      const renamedSpaces = scopedSpaces.map((space) => {
+        if (space.id !== spaceId) {
+          return space
+        }
+        if (!DEFAULT_SPACE_NAME_PATTERN.test(space.name.trim())) {
+          return space
+        }
+        if (space.name.trim() === nextName) {
+          return space
+        }
+        changed = true
+        return { ...space, name: nextName }
+      })
+
+      if (!changed) {
+        return state
+      }
+
+      return {
+        ...state,
+        spacesByScope: {
+          ...state.spacesByScope,
+          [scopeKey]: renamedSpaces
+        }
+      }
+    })
+  }, [])
+
+  const handleFirstUserPrompt = useCallback(
+    async (scopeKey: string, spaceId: string, prompt: string): Promise<void> => {
+      const trimmedPrompt = prompt.trim()
+      if (!trimmedPrompt) {
+        return
+      }
+
+      const fallbackName = deriveAutoSpaceNameFromPrompt(trimmedPrompt)
+      if (!window.api) {
+        applyAutoSpaceName(scopeKey, spaceId, fallbackName)
+        return
+      }
+
+      try {
+        const response = await window.api.chat.suggestSpaceTitle({
+          prompt: trimmedPrompt,
+          cwd: selectedProject?.rootPath
+        })
+
+        if (!response.ok) {
+          applyAutoSpaceName(scopeKey, spaceId, fallbackName)
+          return
+        }
+
+        const modelName = response.data.title.trim() || fallbackName
+        applyAutoSpaceName(scopeKey, spaceId, modelName)
+      } catch {
+        applyAutoSpaceName(scopeKey, spaceId, fallbackName)
+      }
+    },
+    [applyAutoSpaceName, selectedProject?.rootPath]
   )
 
   useEffect(() => {
@@ -2479,6 +2590,7 @@ export function DashboardLayout(): React.JSX.Element {
                     colorMode={resolvedTheme}
                     accentColor={selectedProjectAccentColor}
                     onStreamingChange={handleChatStreamingChange}
+                    onFirstUserPrompt={handleFirstUserPrompt}
                   />
                 )}
               </CardContent>

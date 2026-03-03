@@ -11,6 +11,8 @@ import type {
   ChatHistoryMessage,
   ChatHistoryReplaceInput,
   ChatHistoryScopeInput,
+  ChatSuggestSpaceTitleInput,
+  ChatSuggestSpaceTitleResult,
   ChatResolveAttachmentInput,
   ChatResolveAttachmentResult,
   ChatUploadAttachmentInput,
@@ -108,6 +110,9 @@ type ConfigApi = {
 type ChatApi = {
   complete: (input: ChatCompleteInput) => Promise<IpcResult<ChatCompleteResult>>
   abort: (input: ChatAbortInput) => Promise<IpcResult<boolean>>
+  suggestSpaceTitle: (
+    input: ChatSuggestSpaceTitleInput
+  ) => Promise<IpcResult<ChatSuggestSpaceTitleResult>>
   uploadAttachment: (
     input: ChatUploadAttachmentInput
   ) => Promise<IpcResult<ChatUploadAttachmentResult>>

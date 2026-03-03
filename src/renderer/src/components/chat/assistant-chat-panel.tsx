@@ -12,6 +12,7 @@ import type { ChatHistoryMessage, ChatMessage, ChatToolCall } from '../../../../
 import type { ChatReasoningEffort } from '../../../../shared/ipc/types'
 import { AgentChatIndicator } from '../agents-ui/agent-chat-indicator'
 import { Button } from '../ui/button'
+import { pickRandomDeveloperPlaceholderQuote } from './developer-placeholder-quotes'
 import {
   buildRenderableMessages,
   getMessageText,
@@ -28,6 +29,11 @@ type AssistantChatPanelProps = {
   colorMode: 'light' | 'dark'
   accentColor?: string
   onStreamingChange?: (scopeKey: string, spaceId: string, isStreaming: boolean) => void
+  onFirstUserPrompt?: (
+    scopeKey: string,
+    spaceId: string,
+    prompt: string
+  ) => void | Promise<void>
 }
 
 type AssistantChatSessionBinding = {
@@ -45,6 +51,11 @@ type AssistantChatSessionProps = {
   colorMode: 'light' | 'dark'
   accentColor?: string
   onStreamingChange?: (scopeKey: string, spaceId: string, isStreaming: boolean) => void
+  onFirstUserPrompt?: (
+    scopeKey: string,
+    spaceId: string,
+    prompt: string
+  ) => void | Promise<void>
 }
 
 type ModelOption = {
@@ -78,6 +89,7 @@ const MAX_IMAGE_ATTACHMENT_BYTES = 5 * 1024 * 1024
 const SUPPORTED_IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']
 const MARKDOWN_PLUGINS = [remarkGfm]
 const CHAT_INFLIGHT_STORAGE_PREFIX = 'soloagent:chat:inflight'
+const CHAT_LOCAL_HISTORY_STORAGE_PREFIX = 'soloagent:chat:history:v1'
 const CHAT_INFLIGHT_TTL_MS = 15 * 60 * 1000
 const CHAT_RECOVERY_POLL_MS = 1250
 const CHAT_RECOVERY_TIMEOUT_MS = 2 * 60 * 1000
@@ -197,6 +209,10 @@ function getInflightStorageKey(scopeKey: string, spaceId: string): string {
   return `${CHAT_INFLIGHT_STORAGE_PREFIX}:${scopeKey}:${spaceId}`
 }
 
+function getLocalHistoryStorageKey(scopeKey: string, spaceId: string): string {
+  return `${CHAT_LOCAL_HISTORY_STORAGE_PREFIX}:${scopeKey}:${spaceId}`
+}
+
 function parseInflightChatMarker(raw: string | null): InflightChatMarker | null {
   if (!raw) {
     return null
@@ -220,6 +236,50 @@ function parseInflightChatMarker(raw: string | null): InflightChatMarker | null 
     }
   } catch {
     return null
+  }
+}
+
+function parseLocalHistory(raw: string | null): ChatHistoryMessage[] {
+  if (!raw) {
+    return []
+  }
+
+  try {
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+
+    const messages: ChatHistoryMessage[] = []
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') {
+        continue
+      }
+
+      const candidate = item as Partial<ChatHistoryMessage>
+      if (
+        typeof candidate.id !== 'string' ||
+        candidate.id.trim().length === 0 ||
+        (candidate.role !== 'system' && candidate.role !== 'user' && candidate.role !== 'assistant') ||
+        typeof candidate.content !== 'string' ||
+        candidate.content.trim().length === 0 ||
+        typeof candidate.createdAt !== 'number' ||
+        !Number.isFinite(candidate.createdAt)
+      ) {
+        continue
+      }
+
+      messages.push({
+        id: candidate.id,
+        role: candidate.role,
+        content: candidate.content,
+        createdAt: candidate.createdAt
+      })
+    }
+
+    return messages
+  } catch {
+    return []
   }
 }
 
@@ -1158,7 +1218,8 @@ function AssistantChatSession({
   projectId,
   colorMode,
   accentColor,
-  onStreamingChange
+  onStreamingChange,
+  onFirstUserPrompt
 }: AssistantChatSessionProps): React.JSX.Element {
   const modelInputId = `chat-model-${scopeKey}-${spaceId}`
   const reasoningEffortInputId = `chat-reasoning-${scopeKey}-${spaceId}`
@@ -1176,6 +1237,7 @@ function AssistantChatSession({
   const [liveToolCalls, setLiveToolCalls] = useState<ChatToolCall[]>([])
   const [activeAssistantMessageId, setActiveAssistantMessageId] = useState<string | null>(null)
   const [activeToolMessageId, setActiveToolMessageId] = useState<string | null>(null)
+  const initialPlaceholderQuote = useMemo(() => pickRandomDeveloperPlaceholderQuote(), [])
   const messageViewportRef = useRef<HTMLDivElement | null>(null)
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null)
   const activeRequestIdRef = useRef<string | null>(null)
@@ -1185,6 +1247,10 @@ function AssistantChatSession({
   const shouldAutoScrollRef = useRef(true)
   const dropDepthRef = useRef(0)
   const inflightStorageKey = useMemo(() => getInflightStorageKey(scopeKey, spaceId), [scopeKey, spaceId])
+  const localHistoryStorageKey = useMemo(
+    () => getLocalHistoryStorageKey(scopeKey, spaceId),
+    [scopeKey, spaceId]
+  )
 
   useEffect(() => {
     suppressAbortForReloadRef.current = false
@@ -1195,6 +1261,7 @@ function AssistantChatSession({
     window.addEventListener('beforeunload', markUnload)
     window.addEventListener('pagehide', markUnload)
     return (): void => {
+      suppressAbortForReloadRef.current = true
       window.removeEventListener('beforeunload', markUnload)
       window.removeEventListener('pagehide', markUnload)
     }
@@ -1221,7 +1288,7 @@ function AssistantChatSession({
         setActiveAssistantMessageId(null)
         liveToolCallsRef.current = []
         const abortRequest = (): void => {
-          if (suppressAbortForReloadRef.current && !manualStopRequestedRef.current) {
+          if (!manualStopRequestedRef.current || suppressAbortForReloadRef.current) {
             return
           }
           void window.api.chat.abort({ requestId })
@@ -1590,6 +1657,11 @@ function AssistantChatSession({
     setHistoryError(null)
 
     const loadHistory = async (): Promise<void> => {
+      const localFallback = parseLocalHistory(window.localStorage.getItem(localHistoryStorageKey))
+      if (localFallback.length > 0) {
+        setMessages(toUiMessages(localFallback))
+      }
+
       const response = await window.api.chat.historyGet({
         scopeKey,
         spaceId,
@@ -1600,13 +1672,30 @@ function AssistantChatSession({
       }
 
       if (!response.ok) {
+        if (localFallback.length > 0) {
+          setHistoryError(null)
+          setHistoryReady(true)
+          return
+        }
+
         setMessages([])
         setHistoryError(response.error.message || 'Failed to load chat history.')
         setHistoryReady(true)
         return
       }
 
-      setMessages(toUiMessages(response.data))
+      const remoteMessages = response.data
+      const remoteLatest = remoteMessages[remoteMessages.length - 1]?.createdAt || 0
+      const localLatest = localFallback[localFallback.length - 1]?.createdAt || 0
+      const shouldPreferLocalFallback =
+        localFallback.length > 0 &&
+        (remoteMessages.length === 0 ||
+          localLatest > remoteLatest ||
+          localFallback.length > remoteMessages.length)
+
+      const resolvedMessages = shouldPreferLocalFallback ? localFallback : remoteMessages
+      setMessages(toUiMessages(resolvedMessages))
+      setHistoryError(null)
       setHistoryReady(true)
     }
 
@@ -1615,7 +1704,7 @@ function AssistantChatSession({
     return (): void => {
       cancelled = true
     }
-  }, [projectId, scopeKey, setMessages, spaceId])
+  }, [localHistoryStorageKey, projectId, scopeKey, setMessages, spaceId])
 
   useEffect(() => {
     if (!historyReady || isLoading) {
@@ -1701,7 +1790,7 @@ function AssistantChatSession({
   ])
 
   useEffect(() => {
-    if (!historyReady || isLoading) {
+    if (!historyReady || historyError) {
       return
     }
 
@@ -1717,7 +1806,23 @@ function AssistantChatSession({
     return (): void => {
       window.clearTimeout(timeout)
     }
-  }, [historyReady, isLoading, persistedMessages, projectId, scopeKey, spaceId])
+  }, [historyError, historyReady, persistedMessages, projectId, scopeKey, spaceId])
+
+  useEffect(() => {
+    if (!historyReady || historyError) {
+      return
+    }
+
+    try {
+      if (persistedMessages.length === 0) {
+        window.localStorage.removeItem(localHistoryStorageKey)
+        return
+      }
+      window.localStorage.setItem(localHistoryStorageKey, JSON.stringify(persistedMessages))
+    } catch {
+      // Ignore localStorage failures.
+    }
+  }, [historyError, historyReady, localHistoryStorageKey, persistedMessages])
 
   useEffect(() => {
     const viewport = messageViewportRef.current
@@ -1934,6 +2039,10 @@ function AssistantChatSession({
       }
 
       const composedPrompt = `${trimmed}${attachmentMarkdown}`.trim()
+      const hasUserMessage = messages.some((message) => message.role === 'user')
+      if (!hasUserMessage && trimmed) {
+        void onFirstUserPrompt?.(scopeKey, spaceId, trimmed)
+      }
       setPrompt('')
       setAttachmentError(null)
       setImageAttachments([])
@@ -1948,6 +2057,7 @@ function AssistantChatSession({
     () => historyReady && !isLoading && (prompt.trim().length > 0 || imageAttachments.length > 0),
     [historyReady, imageAttachments.length, isLoading, prompt]
   )
+  const promptPlaceholder = 'Message Codex...'
   const thinkingDotStyle = useMemo(
     () => {
       const base = hexToHslChannels(accentColor || '#2563eb') || { h: 221, s: 83, l: 53 }
@@ -1968,6 +2078,7 @@ function AssistantChatSession({
   const handleClearChat = (): void => {
     clear()
     window.sessionStorage.removeItem(inflightStorageKey)
+    window.localStorage.removeItem(localHistoryStorageKey)
     setIsRecoveringResponse(false)
     setImageAttachments([])
     setAttachmentError(null)
@@ -1980,11 +2091,7 @@ function AssistantChatSession({
     }
 
     if (renderItems.length === 0) {
-      return (
-        <div className="text-xs text-muted-foreground">
-          Ask anything about this project. Responses run through Codex CLI in this workspace.
-        </div>
-      )
+      return <div className="text-xs text-muted-foreground">{initialPlaceholderQuote}</div>
     }
 
     if (shouldVirtualize) {
@@ -2183,13 +2290,13 @@ function AssistantChatSession({
               void submitPrompt()
             }
           }}
-          placeholder="Message Codex..."
+          placeholder={promptPlaceholder}
           className="h-[30px] flex-1 resize-none rounded-md border border-border/70 bg-background px-2 py-1.5 text-xs leading-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           disabled={isLoading || !historyReady}
         />
         <Button
           size="sm"
-          className="h-7 text-xs"
+          className="h-[30px] text-xs"
           onClick={() => void submitPrompt()}
           disabled={!canSubmitPrompt}
         >
@@ -2206,7 +2313,8 @@ export const AssistantChatPanel = memo(function AssistantChatPanel({
   sessions,
   colorMode,
   accentColor,
-  onStreamingChange
+  onStreamingChange,
+  onFirstUserPrompt
 }: AssistantChatPanelProps): React.JSX.Element {
   const scopeSessions = useMemo(
     () => sessions.filter((session) => session.scopeKey === activeScopeKey),
@@ -2242,6 +2350,7 @@ export const AssistantChatPanel = memo(function AssistantChatPanel({
               colorMode={colorMode}
               accentColor={accentColor}
               onStreamingChange={onStreamingChange}
+              onFirstUserPrompt={onFirstUserPrompt}
             />
           </div>
         )

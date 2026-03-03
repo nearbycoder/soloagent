@@ -32,6 +32,11 @@ const chatAbortSchema = z.object({
   requestId: z.string().trim().min(1)
 })
 
+const chatSuggestSpaceTitleSchema = z.object({
+  prompt: z.string().trim().min(1).max(4000),
+  cwd: z.string().optional()
+})
+
 const chatUploadAttachmentSchema = z.object({
   scopeKey: z.string().trim().min(1),
   spaceId: z.string().trim().min(1),
@@ -61,6 +66,8 @@ const chatHistoryReplaceSchema = chatHistoryScopeSchema.extend({
 })
 
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
+const SPACE_TITLE_MODEL = 'gpt-5.1-codex-mini'
+const MAX_SPACE_TITLE_CHARS = 52
 
 function buildCompletionHistoryMessages(
   input: z.infer<typeof chatCompleteSchema>,
@@ -105,6 +112,51 @@ function buildCompletionHistoryMessages(
   }
 
   return messages
+}
+
+function deriveFallbackSpaceTitle(prompt: string): string {
+  const compact = prompt.replace(/\s+/g, ' ').trim()
+  if (!compact) {
+    return 'New Task'
+  }
+
+  const withoutPrefix = compact
+    .replace(/^(please|can you|could you|can we|would you|help me|i need to|i want to|let'?s)\s+/i, '')
+    .trim()
+  const firstClause = (withoutPrefix.split(/[.!?]/)[0] || withoutPrefix).trim()
+  if (!firstClause) {
+    return 'New Task'
+  }
+
+  const firstWords = firstClause.split(' ').slice(0, 8).join(' ')
+  const trimmed =
+    firstWords.length > MAX_SPACE_TITLE_CHARS
+      ? firstWords.slice(0, MAX_SPACE_TITLE_CHARS).replace(/\s+\S*$/, '')
+      : firstWords
+  const safe = trimmed.replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '').trim()
+  if (!safe) {
+    return 'New Task'
+  }
+  return safe[0]?.toUpperCase() + safe.slice(1)
+}
+
+function normalizeSuggestedSpaceTitle(value: string): string {
+  const compact = value
+    .replace(/[`"'*_#[\](){}<>]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!compact) {
+    return ''
+  }
+
+  const firstLine = compact.split('\n')[0]?.trim() || compact
+  const withoutPrefix = firstLine.replace(/^title\s*:\s*/i, '').trim()
+  const safe = withoutPrefix
+    .replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '')
+    .slice(0, MAX_SPACE_TITLE_CHARS)
+    .trim()
+
+  return safe
 }
 
 function getAttachmentsRootDir(): string {
@@ -307,6 +359,47 @@ export function registerChatHandlers(context: IpcContext): void {
       }
 
       return true
+    })
+  )
+
+  ipcMain.handle(ipcChannels.chat.suggestSpaceTitle, (_, rawInput) =>
+    safeInvoke(async () => {
+      const input = chatSuggestSpaceTitleSchema.parse(rawInput)
+      const fallbackTitle = deriveFallbackSpaceTitle(input.prompt)
+      const selectedProject = context.projects.current()
+      const cwd = selectedProject?.rootPath || input.cwd || process.cwd()
+
+      try {
+        const completion = await runCodexCompletion(
+          {
+            requestId: `space-title-${randomUUID()}`,
+            model: SPACE_TITLE_MODEL,
+            reasoningEffort: 'low',
+            cwd,
+            messages: [
+              {
+                role: 'system',
+                content:
+                  'Create a concise workspace title from the user request. Return title text only. No quotes. Max 52 characters.'
+              },
+              {
+                role: 'user',
+                content: input.prompt
+              }
+            ]
+          },
+          runningRequests
+        )
+
+        return {
+          title: normalizeSuggestedSpaceTitle(completion.text) || fallbackTitle
+        }
+      } catch (error) {
+        context.logger.warn('Space title generation failed; using fallback.', {
+          error: error instanceof Error ? error.message : String(error)
+        })
+        return { title: fallbackTitle }
+      }
     })
   )
 

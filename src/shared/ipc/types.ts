@@ -208,6 +208,15 @@ export type ChatAbortInput = {
   requestId: string
 }
 
+export type ChatSuggestSpaceTitleInput = {
+  prompt: string
+  cwd?: string
+}
+
+export type ChatSuggestSpaceTitleResult = {
+  title: string
+}
+
 export type ChatUploadAttachmentInput = {
   scopeKey: string
   spaceId: string
