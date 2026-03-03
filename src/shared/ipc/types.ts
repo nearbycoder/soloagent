@@ -189,14 +189,34 @@ export type ChatToolCall = {
   exitCode?: number
 }
 
+export type ChatCompleteSegment = {
+  text: string
+  toolCalls: ChatToolCall[]
+}
+
 export type ChatCompleteResult = {
   text: string
   model: string
   toolCalls: ChatToolCall[]
+  segments?: ChatCompleteSegment[]
 }
 
 export type ChatAbortInput = {
   requestId: string
+}
+
+export type ChatUploadAttachmentInput = {
+  scopeKey: string
+  spaceId: string
+  projectId?: string
+  fileName: string
+  dataUrl: string
+}
+
+export type ChatUploadAttachmentResult = {
+  fileName: string
+  url: string
+  bytes: number
 }
 
 export type ChatToolCallEvent = {

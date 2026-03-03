@@ -1,5 +1,10 @@
 import { spawn } from 'node:child_process'
-import type { ChatCompleteInput, ChatCompleteResult, ChatToolCall } from '../../shared/ipc/types'
+import type {
+  ChatCompleteInput,
+  ChatCompleteResult,
+  ChatCompleteSegment,
+  ChatToolCall
+} from '../../shared/ipc/types'
 import { ensureShellPathInProcessEnv, resolveCommandExecutable } from './shell-env'
 
 export type SpawnedCodexProcess = {
@@ -182,6 +187,16 @@ export function buildCodexPrompt(messages: ChatCompleteInput['messages']): strin
   ].join('\n\n')
 }
 
+function buildOrderedToolCalls(
+  toolCallOrder: string[],
+  toolCallsById: Map<string, ChatToolCall>
+): ChatToolCall[] {
+  return toolCallOrder
+    .map((id) => toolCallsById.get(id))
+    .filter((tool): tool is ChatToolCall => Boolean(tool))
+    .map((tool) => ({ ...tool }))
+}
+
 export async function runCodexCompletion(
   input: ChatCompleteInput,
   runningRequests: Map<string, RunningChatRequest>,
@@ -229,6 +244,7 @@ export async function runCodexCompletion(
     let stdoutBuffer = ''
     let stderrBuffer = ''
     const assistantMessages: string[] = []
+    const messageSegments: ChatCompleteSegment[] = []
     const errors: string[] = []
     const toolCallsById = new Map<string, ChatToolCall>()
     const toolCallOrder: string[] = []
@@ -261,7 +277,14 @@ export async function runCodexCompletion(
         if (parsedType === 'item.completed' && itemType === 'agent_message') {
           const itemText = asString(item?.text)
           if (itemText?.trim()) {
-            assistantMessages.push(itemText.trim())
+            const text = itemText.trim()
+            assistantMessages.push(text)
+            messageSegments.push({
+              text,
+              toolCalls: buildOrderedToolCalls(toolCallOrder, toolCallsById)
+            })
+            toolCallsById.clear()
+            toolCallOrder.length = 0
           }
           return
         }
@@ -380,12 +403,21 @@ export async function runCodexCompletion(
         return
       }
 
+      const trailingToolCalls = buildOrderedToolCalls(toolCallOrder, toolCallsById)
+      if (trailingToolCalls.length > 0 && messageSegments.length > 0) {
+        const lastSegment = messageSegments[messageSegments.length - 1]
+        if (lastSegment) {
+          lastSegment.toolCalls = [...lastSegment.toolCalls, ...trailingToolCalls]
+        }
+      }
+
+      const flattenedToolCalls = messageSegments.flatMap((segment) => segment.toolCalls)
+
       resolve({
         text,
         model: input.model,
-        toolCalls: toolCallOrder
-          .map((id) => toolCallsById.get(id))
-          .filter((tool): tool is ChatToolCall => Boolean(tool))
+        toolCalls: flattenedToolCalls,
+        segments: messageSegments
       })
     })
   })

@@ -82,6 +82,10 @@ type ChildProcessFailure = {
   message?: string
 }
 
+const GIT_NOT_REPO_ERROR_MESSAGE =
+  'No Git repository found for this project. Open a Git repo or run `git init` in the project folder.'
+const GIT_NOT_INSTALLED_ERROR_MESSAGE = 'Git is not installed or not available in PATH.'
+
 function trimToUndefined(value: string | undefined): string | undefined {
   if (!value) {
     return undefined
@@ -107,6 +111,25 @@ function getChildProcessOutput(error: unknown): string {
   const messageText = typeof maybeError?.message === 'string' ? maybeError.message : ''
 
   return trimToUndefined([stderrText, stdoutText, messageText].filter(Boolean).join('\n')) || ''
+}
+
+function mapGitExecutionError(error: unknown, fallbackMessage: string): Error {
+  const maybeError = error as ChildProcessFailure
+  if (maybeError?.code === 'ENOENT') {
+    return new Error(GIT_NOT_INSTALLED_ERROR_MESSAGE)
+  }
+
+  const output = getChildProcessOutput(error)
+  const normalized = output.toLowerCase()
+  if (
+    normalized.includes('not a git repository') ||
+    normalized.includes('outside repository') ||
+    normalized.includes('not in a git directory')
+  ) {
+    return new Error(GIT_NOT_REPO_ERROR_MESSAGE)
+  }
+
+  return new Error(trimToUndefined(output) || fallbackMessage)
 }
 
 export function mapGhExecutionError(error: unknown): Error {
@@ -147,11 +170,7 @@ function runGit(cwd: string, args: string[]): string {
       maxBuffer: 16 * 1024 * 1024
     })
   } catch (error) {
-    const message =
-      error instanceof Error && error.message
-        ? error.message
-        : 'Git command failed for the selected project.'
-    throw new Error(message)
+    throw mapGitExecutionError(error, 'Git command failed for the selected project.')
   }
 }
 
@@ -183,10 +202,7 @@ async function runGitAsync(cwd: string, args: string[]): Promise<string> {
   try {
     return await execFileTextAsync('git', args, cwd)
   } catch (error) {
-    const message =
-      trimToUndefined(getChildProcessOutput(error)) ||
-      'Git command failed for the selected project.'
-    throw new Error(message)
+    throw mapGitExecutionError(error, 'Git command failed for the selected project.')
   }
 }
 
@@ -239,11 +255,7 @@ function runGitAllowingStatus(cwd: string, args: string[], allowedStatuses: numb
       return ''
     }
 
-    const message =
-      error instanceof Error && error.message
-        ? error.message
-        : 'Git command failed for the selected project.'
-    throw new Error(message)
+    throw mapGitExecutionError(error, 'Git command failed for the selected project.')
   }
 }
 

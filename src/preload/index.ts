@@ -9,6 +9,7 @@ import type {
   ChatEvent,
   ChatHistoryReplaceInput,
   ChatHistoryScopeInput,
+  ChatUploadAttachmentInput,
   CloseTerminalInput,
   CreateTerminalInput,
   RenameTerminalInput,
@@ -111,6 +112,8 @@ const configApi = {
 const chatApi = {
   complete: (input: ChatCompleteInput) => ipcRenderer.invoke(ipcChannels.chat.complete, input),
   abort: (input: ChatAbortInput) => ipcRenderer.invoke(ipcChannels.chat.abort, input),
+  uploadAttachment: (input: ChatUploadAttachmentInput) =>
+    ipcRenderer.invoke(ipcChannels.chat.uploadAttachment, input),
   historyGet: (input: ChatHistoryScopeInput) =>
     ipcRenderer.invoke(ipcChannels.chat.historyGet, input),
   historyReplace: (input: ChatHistoryReplaceInput) =>

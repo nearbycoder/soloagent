@@ -2,7 +2,7 @@ import type { ModelMessage, StreamChunk } from '@tanstack/ai'
 import type { ConnectionAdapter, UIMessage } from '@tanstack/ai-client'
 import { useChat } from '@tanstack/ai-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { Check, ChevronDown, Search } from 'lucide-react'
+import { Check, ChevronDown, LoaderCircle, Search, X } from 'lucide-react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism'
@@ -70,6 +70,9 @@ const AUTO_SCROLL_THRESHOLD_PX = 96
 const PROMPT_MIN_HEIGHT_PX = 30
 const PROMPT_MAX_HEIGHT_PX = 160
 const TOOL_TRACE_VERSION = 1
+const MAX_IMAGE_ATTACHMENTS = 4
+const MAX_IMAGE_ATTACHMENT_BYTES = 5 * 1024 * 1024
+const SUPPORTED_IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']
 const MARKDOWN_PLUGINS = [remarkGfm]
 
 type ToolTracePayloadItem = {
@@ -100,6 +103,13 @@ type LiveToolRenderItem = {
 }
 
 type ChatRenderItem = ChatMessageRenderItem | LiveToolRenderItem
+type PendingImageAttachment = {
+  id: string
+  name: string
+  mimeType: string
+  size: number
+  dataUrl: string
+}
 
 function createRequestId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -107,6 +117,42 @@ function createRequestId(): string {
   }
 
   return `chat-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function createAttachmentId(): string {
+  return `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function isImageFile(file: File): boolean {
+  if (file.type.toLowerCase().startsWith('image/')) {
+    return true
+  }
+
+  const lowercaseName = file.name.toLowerCase()
+  return SUPPORTED_IMAGE_EXTENSIONS.some((extension) => lowercaseName.endsWith(extension))
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => {
+      reject(new Error(`Failed to read ${file.name}.`))
+    }
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : ''
+      if (!result) {
+        reject(new Error(`Failed to read ${file.name}.`))
+        return
+      }
+      resolve(result)
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
+function escapeMarkdownImageAlt(value: string): string {
+  const normalized = value.replace(/[\r\n]+/g, ' ').replace(/[()[\]]+/g, ' ').trim()
+  return normalized || 'Attachment'
 }
 
 function chunkText(text: string, chunkSize: number): string[] {
@@ -347,6 +393,32 @@ function isAllowedMarkdownHref(href?: string): boolean {
   }
 }
 
+function isAllowedMarkdownImageSrc(src?: string): boolean {
+  if (!src) {
+    return false
+  }
+
+  try {
+    const url = new URL(src)
+    if (url.protocol === 'https:' || url.protocol === 'http:' || url.protocol === 'data:') {
+      return true
+    }
+    if (url.protocol === 'file:') {
+      return decodeURIComponent(url.pathname).includes('/chat-attachments/')
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
+function transformMarkdownUrl(url: string): string {
+  if (isAllowedMarkdownHref(url) || isAllowedMarkdownImageSrc(url)) {
+    return url
+  }
+  return ''
+}
+
 function isReasoningEffort(value: string): value is ChatReasoningEffort {
   return value === 'low' || value === 'medium' || value === 'high'
 }
@@ -386,6 +458,22 @@ const MessageContent = memo(function MessageContent({
           >
             {children}
           </a>
+        )
+      },
+      img: ({ src, alt }) => {
+        if (!isAllowedMarkdownImageSrc(src)) {
+          return (
+            <span className="text-muted-foreground">{alt || 'Image attachment unavailable.'}</span>
+          )
+        }
+
+        return (
+          <img
+            src={src}
+            alt={alt || 'Attachment'}
+            loading="lazy"
+            className="max-h-64 w-auto rounded-md border border-border/70 bg-background/60"
+          />
         )
       },
       code: ({ className, children }) => {
@@ -446,7 +534,12 @@ const MessageContent = memo(function MessageContent({
 
   return (
     <div className="space-y-2 [&>*+*]:mt-2">
-      <ReactMarkdown skipHtml remarkPlugins={MARKDOWN_PLUGINS} components={markdownComponents}>
+      <ReactMarkdown
+        skipHtml
+        remarkPlugins={MARKDOWN_PLUGINS}
+        components={markdownComponents}
+        urlTransform={transformMarkdownUrl}
+      >
         {content || ''}
       </ReactMarkdown>
     </div>
@@ -796,6 +889,9 @@ function AssistantChatSession({
   const [reasoningEffort, setReasoningEffort] =
     useState<ChatReasoningEffort>(DEFAULT_REASONING_EFFORT)
   const [prompt, setPrompt] = useState('')
+  const [imageAttachments, setImageAttachments] = useState<PendingImageAttachment[]>([])
+  const [attachmentError, setAttachmentError] = useState<string | null>(null)
+  const [isDropTargetActive, setIsDropTargetActive] = useState(false)
   const [historyReady, setHistoryReady] = useState(false)
   const [historyError, setHistoryError] = useState<string | null>(null)
   const [liveToolCalls, setLiveToolCalls] = useState<ChatToolCall[]>([])
@@ -806,6 +902,7 @@ function AssistantChatSession({
   const activeRequestIdRef = useRef<string | null>(null)
   const liveToolCallsRef = useRef<ChatToolCall[]>([])
   const shouldAutoScrollRef = useRef(true)
+  const dropDepthRef = useRef(0)
 
   const connection = useMemo<ConnectionAdapter>(
     () => ({
@@ -851,11 +948,24 @@ function AssistantChatSession({
           }
 
           const runId = `run-${Date.now()}`
-          const messageId = `assistant-${Date.now()}`
           const now = Date.now()
-          const assistantText = response.data.text || ''
           const toolCalls = response.data.toolCalls || []
-          const resolvedToolCalls = toolCalls.length > 0 ? toolCalls : liveToolCallsRef.current
+          const fallbackToolCalls = toolCalls.length > 0 ? toolCalls : liveToolCallsRef.current
+          const normalizedSegments =
+            Array.isArray(response.data.segments) && response.data.segments.length > 0
+              ? response.data.segments
+                  .map((segment) => ({
+                    text: typeof segment?.text === 'string' ? segment.text : '',
+                    toolCalls: Array.isArray(segment?.toolCalls) ? segment.toolCalls : []
+                  }))
+                  .filter(
+                    (segment) => segment.text.trim().length > 0 || segment.toolCalls.length > 0
+                  )
+              : [{ text: response.data.text || '', toolCalls: fallbackToolCalls }]
+
+          if (normalizedSegments.length === 0) {
+            throw new Error('Chat request failed: empty assistant response.')
+          }
 
           yield {
             type: 'RUN_STARTED',
@@ -864,78 +974,89 @@ function AssistantChatSession({
             model
           }
 
-          if (resolvedToolCalls.length > 0) {
-            const toolMessageId = `tools-${Date.now()}`
-            const toolContent = formatToolCallsMessage(resolvedToolCalls)
-            setActiveToolMessageId(toolMessageId)
-            yield {
-              type: 'TEXT_MESSAGE_START',
-              messageId: toolMessageId,
-              role: 'assistant',
-              timestamp: Date.now(),
-              model
-            }
-            yield {
-              type: 'TEXT_MESSAGE_CONTENT',
-              messageId: toolMessageId,
-              delta: toolContent,
-              content: toolContent,
-              timestamp: Date.now(),
-              model
-            }
-            yield {
-              type: 'TEXT_MESSAGE_END',
-              messageId: toolMessageId,
-              timestamp: Date.now(),
-              model
-            }
-          }
+          setLiveToolCalls([])
+          liveToolCallsRef.current = []
 
-          yield {
-            type: 'TEXT_MESSAGE_START',
-            messageId,
-            role: 'assistant',
-            timestamp: now,
-            model
-          }
-          setActiveAssistantMessageId(messageId)
+          let segmentIndex = 0
+          for (const segment of normalizedSegments) {
+            const assistantMessageId = `assistant-${now}-${segmentIndex}`
+            const segmentToolCalls = segment.toolCalls || []
+            const assistantText = segment.text || ''
 
-          if (assistantText.length > 0) {
-            const chunks = chunkText(assistantText, STREAM_CHUNK_SIZE)
-            for (const chunk of chunks) {
-              if (abortSignal?.aborted) {
-                return
-              }
-              if (!chunk) {
-                continue
-              }
-              const timestamp = Date.now()
+            if (segmentToolCalls.length > 0) {
+              const toolMessageId = `tools-${now}-${segmentIndex}`
+              const toolContent = formatToolCallsMessage(segmentToolCalls)
+              setActiveToolMessageId(toolMessageId)
               yield {
-                type: 'TEXT_MESSAGE_CONTENT',
-                messageId,
-                delta: chunk,
-                content: chunk,
-                timestamp,
+                type: 'TEXT_MESSAGE_START',
+                messageId: toolMessageId,
+                role: 'assistant',
+                timestamp: Date.now(),
                 model
               }
-              await sleep(STREAM_DELAY_MS)
+              yield {
+                type: 'TEXT_MESSAGE_CONTENT',
+                messageId: toolMessageId,
+                delta: toolContent,
+                content: toolContent,
+                timestamp: Date.now(),
+                model
+              }
+              yield {
+                type: 'TEXT_MESSAGE_END',
+                messageId: toolMessageId,
+                timestamp: Date.now(),
+                model
+              }
             }
-          } else {
+
             yield {
-              type: 'TEXT_MESSAGE_CONTENT',
-              messageId,
-              delta: '',
-              content: '',
+              type: 'TEXT_MESSAGE_START',
+              messageId: assistantMessageId,
+              role: 'assistant',
+              timestamp: now,
+              model
+            }
+            setActiveAssistantMessageId(assistantMessageId)
+
+            if (assistantText.length > 0) {
+              const chunks = chunkText(assistantText, STREAM_CHUNK_SIZE)
+              for (const chunk of chunks) {
+                if (abortSignal?.aborted) {
+                  return
+                }
+                if (!chunk) {
+                  continue
+                }
+                const timestamp = Date.now()
+                yield {
+                  type: 'TEXT_MESSAGE_CONTENT',
+                  messageId: assistantMessageId,
+                  delta: chunk,
+                  content: chunk,
+                  timestamp,
+                  model
+                }
+                await sleep(STREAM_DELAY_MS)
+              }
+            } else {
+              yield {
+                type: 'TEXT_MESSAGE_CONTENT',
+                messageId: assistantMessageId,
+                delta: '',
+                content: '',
+                timestamp: Date.now(),
+                model
+              }
+            }
+
+            yield {
+              type: 'TEXT_MESSAGE_END',
+              messageId: assistantMessageId,
               timestamp: Date.now(),
               model
             }
-          }
-
-          yield {
-            type: 'TEXT_MESSAGE_END',
-            messageId,
-            timestamp: Date.now(),
-            model
+            segmentIndex += 1
           }
 
           yield {
@@ -1051,6 +1172,7 @@ function AssistantChatSession({
       ...messageItems.slice(insertBeforeIndex)
     ]
   }, [activeAssistantMessageId, liveToolItem, messageItems])
+  const showThinkingIndicator = isLoading && !activeAssistantMessageId && liveToolCalls.length === 0
   const shouldVirtualize = shouldVirtualizeChatMessages(renderItems.length)
   const rowVirtualizer = useVirtualizer({
     count: renderItems.length,
@@ -1197,9 +1319,143 @@ function AssistantChatSession({
     resizePromptInput(promptInputRef.current)
   }, [prompt])
 
+  const clearDropOverlay = (): void => {
+    dropDepthRef.current = 0
+    setIsDropTargetActive(false)
+  }
+
+  const addImageAttachments = async (files: File[]): Promise<void> => {
+    if (files.length === 0) {
+      return
+    }
+
+    if (isLoading) {
+      setAttachmentError('Please wait for the current response before attaching images.')
+      return
+    }
+
+    const imageFiles = files.filter((file) => isImageFile(file))
+    if (imageFiles.length === 0) {
+      setAttachmentError('Only image files can be attached.')
+      return
+    }
+
+    setAttachmentError(null)
+
+    const availableSlots = Math.max(0, MAX_IMAGE_ATTACHMENTS - imageAttachments.length)
+    if (availableSlots === 0) {
+      setAttachmentError(`You can attach up to ${MAX_IMAGE_ATTACHMENTS} images per message.`)
+      return
+    }
+
+    let oversizedCount = 0
+    let readFailureCount = 0
+    const accepted = imageFiles.slice(0, availableSlots)
+    const nextAttachments: PendingImageAttachment[] = []
+
+    for (const file of accepted) {
+      if (file.size > MAX_IMAGE_ATTACHMENT_BYTES) {
+        oversizedCount += 1
+        continue
+      }
+
+      try {
+        const dataUrl = await readFileAsDataUrl(file)
+        nextAttachments.push({
+          id: createAttachmentId(),
+          name: file.name,
+          mimeType: file.type || 'image/*',
+          size: file.size,
+          dataUrl
+        })
+      } catch {
+        readFailureCount += 1
+      }
+    }
+
+    if (nextAttachments.length > 0) {
+      setImageAttachments((current) =>
+        [...current, ...nextAttachments].slice(0, MAX_IMAGE_ATTACHMENTS)
+      )
+    }
+
+    const skippedByLimit = Math.max(0, imageFiles.length - accepted.length)
+    if (oversizedCount > 0 || readFailureCount > 0 || skippedByLimit > 0) {
+      const problems: string[] = []
+      if (oversizedCount > 0) {
+        problems.push(
+          `${oversizedCount} file${oversizedCount === 1 ? '' : 's'} exceeded ${
+            MAX_IMAGE_ATTACHMENT_BYTES / (1024 * 1024)
+          }MB`
+        )
+      }
+      if (readFailureCount > 0) {
+        problems.push(`${readFailureCount} file${readFailureCount === 1 ? '' : 's'} failed to read`)
+      }
+      if (skippedByLimit > 0) {
+        problems.push(
+          `${skippedByLimit} file${skippedByLimit === 1 ? '' : 's'} skipped (limit reached)`
+        )
+      }
+      setAttachmentError(problems.join('. '))
+    }
+  }
+
+  const handleMessageViewportDragEnter = (event: React.DragEvent<HTMLDivElement>): void => {
+    if (!event.dataTransfer.types.includes('Files')) {
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    dropDepthRef.current += 1
+    setIsDropTargetActive(true)
+  }
+
+  const handleMessageViewportDragOver = (event: React.DragEvent<HTMLDivElement>): void => {
+    if (!event.dataTransfer.types.includes('Files')) {
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = 'copy'
+    if (!isDropTargetActive) {
+      setIsDropTargetActive(true)
+    }
+  }
+
+  const handleMessageViewportDragLeave = (event: React.DragEvent<HTMLDivElement>): void => {
+    if (!event.dataTransfer.types.includes('Files')) {
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    dropDepthRef.current = Math.max(0, dropDepthRef.current - 1)
+    if (dropDepthRef.current === 0) {
+      setIsDropTargetActive(false)
+    }
+  }
+
+  const handleMessageViewportDrop = (event: React.DragEvent<HTMLDivElement>): void => {
+    if (!event.dataTransfer.types.includes('Files')) {
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    clearDropOverlay()
+    const droppedFiles = Array.from(event.dataTransfer.files || [])
+    void addImageAttachments(droppedFiles)
+  }
+
   const submitPrompt = async (): Promise<void> => {
     const trimmed = prompt.trim()
-    if (!trimmed || isLoading || !historyReady) {
+    if ((!trimmed && imageAttachments.length === 0) || isLoading || !historyReady) {
+      return
+    }
+    if (!window.api) {
       return
     }
 
@@ -1213,8 +1469,49 @@ function AssistantChatSession({
       }
     }
 
-    setPrompt('')
-    await sendMessage(trimmed)
+    try {
+      let attachmentMarkdown = ''
+      if (imageAttachments.length > 0) {
+        const uploadedLinks: string[] = []
+        for (const attachment of imageAttachments) {
+          const uploadResponse = await window.api.chat.uploadAttachment({
+            scopeKey,
+            spaceId,
+            projectId,
+            fileName: attachment.name,
+            dataUrl: attachment.dataUrl
+          })
+          if (!uploadResponse.ok) {
+            throw new Error(uploadResponse.error.message || `Failed to upload ${attachment.name}.`)
+          }
+          uploadedLinks.push(
+            `![${escapeMarkdownImageAlt(attachment.name)}](${uploadResponse.data.url})`
+          )
+        }
+        attachmentMarkdown = `\n\nAttached images:\n${uploadedLinks.join('\n')}`
+      }
+
+      const composedPrompt = `${trimmed}${attachmentMarkdown}`.trim()
+      setPrompt('')
+      setAttachmentError(null)
+      setImageAttachments([])
+      await sendMessage(composedPrompt)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to upload image attachment.'
+      setAttachmentError(message)
+    }
+  }
+
+  const canSubmitPrompt = useMemo(
+    () => historyReady && !isLoading && (prompt.trim().length > 0 || imageAttachments.length > 0),
+    [historyReady, imageAttachments.length, isLoading, prompt]
+  )
+
+  const handleClearChat = (): void => {
+    clear()
+    setImageAttachments([])
+    setAttachmentError(null)
+    clearDropOverlay()
   }
 
   const messageList = useMemo(() => {
@@ -1318,8 +1615,10 @@ function AssistantChatSession({
             size="sm"
             variant="ghost"
             className="h-6 px-2 text-[11px]"
-            onClick={clear}
-            disabled={messages.length === 0 || isLoading || !historyReady}
+            onClick={handleClearChat}
+            disabled={
+              (messages.length === 0 && imageAttachments.length === 0) || isLoading || !historyReady
+            }
           >
             Clear
           </Button>
@@ -1328,6 +1627,10 @@ function AssistantChatSession({
 
       <div
         ref={messageViewportRef}
+        onDragEnter={handleMessageViewportDragEnter}
+        onDragOver={handleMessageViewportDragOver}
+        onDragLeave={handleMessageViewportDragLeave}
+        onDrop={handleMessageViewportDrop}
         onScroll={() => {
           const viewport = messageViewportRef.current
           if (!viewport) {
@@ -1335,14 +1638,66 @@ function AssistantChatSession({
           }
           shouldAutoScrollRef.current = isNearBottom(viewport)
         }}
-        className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border/70 bg-muted/20 p-2"
+        className="relative min-h-0 flex-1 overflow-y-auto rounded-md border border-border/70 bg-muted/20 p-2"
       >
         {messageList}
+        {showThinkingIndicator ? (
+          <div className="mt-2 flex justify-start" aria-live="polite">
+            <div className="inline-flex max-w-[88%] items-center gap-1.5 rounded-xl border border-border/70 bg-background/70 px-2.5 py-2 text-xs text-muted-foreground">
+              <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin" />
+              <span className="whitespace-nowrap">Codex is thinking...</span>
+            </div>
+          </div>
+        ) : null}
+        {isDropTargetActive ? (
+          <div className="pointer-events-none absolute inset-2 z-20 flex items-center justify-center rounded-md border-2 border-dashed border-blue-500/60 bg-blue-500/10">
+            <div className="rounded-md border border-border/70 bg-background/90 px-3 py-2 text-xs font-medium text-foreground shadow-sm">
+              Drop images to attach
+            </div>
+          </div>
+        ) : null}
       </div>
 
       {historyError || error ? (
         <div className="rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive">
           {historyError || error?.message}
+        </div>
+      ) : null}
+
+      {imageAttachments.length > 0 ? (
+        <div className="flex flex-wrap gap-2 rounded-md border border-border/70 bg-muted/20 p-2">
+          {imageAttachments.map((attachment) => (
+            <div
+              key={attachment.id}
+              className="group relative h-16 w-16 overflow-hidden rounded-md border border-border/70 bg-background"
+              title={`${attachment.name} (${Math.max(1, Math.round(attachment.size / 1024))}KB)`}
+            >
+              <img
+                src={attachment.dataUrl}
+                alt={attachment.name}
+                className="h-full w-full object-cover"
+              />
+              <button
+                type="button"
+                className="absolute right-1 top-1 inline-flex h-4 w-4 items-center justify-center rounded-full bg-background/90 text-foreground shadow-sm transition-opacity group-hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={() =>
+                  setImageAttachments((current) =>
+                    current.filter((currentAttachment) => currentAttachment.id !== attachment.id)
+                  )
+                }
+                aria-label={`Remove ${attachment.name}`}
+                disabled={isLoading}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {attachmentError ? (
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive">
+          {attachmentError}
         </div>
       ) : null}
 
@@ -1369,7 +1724,7 @@ function AssistantChatSession({
           size="sm"
           className="h-7 text-xs"
           onClick={() => void submitPrompt()}
-          disabled={isLoading || !historyReady}
+          disabled={!canSubmitPrompt}
         >
           Send
         </Button>

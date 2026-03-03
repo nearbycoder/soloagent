@@ -11,6 +11,8 @@ import type {
   ChatHistoryMessage,
   ChatHistoryReplaceInput,
   ChatHistoryScopeInput,
+  ChatUploadAttachmentInput,
+  ChatUploadAttachmentResult,
   CreateProjectInput,
   CreateAgentProfileInput,
   AssignAgentTerminalInput,
@@ -104,6 +106,9 @@ type ConfigApi = {
 type ChatApi = {
   complete: (input: ChatCompleteInput) => Promise<IpcResult<ChatCompleteResult>>
   abort: (input: ChatAbortInput) => Promise<IpcResult<boolean>>
+  uploadAttachment: (
+    input: ChatUploadAttachmentInput
+  ) => Promise<IpcResult<ChatUploadAttachmentResult>>
   historyGet: (input: ChatHistoryScopeInput) => Promise<IpcResult<ChatHistoryMessage[]>>
   historyReplace: (input: ChatHistoryReplaceInput) => Promise<IpcResult<boolean>>
   onEvent: (callback: (event: ChatEvent) => void) => () => void

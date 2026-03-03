@@ -131,6 +131,19 @@ describe('codex-chat-service', () => {
     expect(result.text).toBe('Done. Tests are green.')
     expect(result.model).toBe('gpt-5-codex')
     expect(result.toolCalls).toHaveLength(1)
+    expect(result.segments).toEqual([
+      {
+        text: 'Done. Tests are green.',
+        toolCalls: [
+          expect.objectContaining({
+            id: 'tool-1',
+            title: 'npm run test',
+            status: 'completed',
+            exitCode: 0
+          })
+        ]
+      }
+    ])
     expect(result.toolCalls[0]).toMatchObject({
       id: 'tool-1',
       title: 'npm run test',
@@ -269,5 +282,81 @@ describe('codex-chat-service', () => {
     process.finish(0)
 
     await expect(completionPromise).rejects.toThrow('Codex returned no assistant response.')
+  })
+
+  it('groups tool calls by assistant message segment', async () => {
+    const process = new MockCodexProcess()
+    const spawnCodex: SpawnCodexProcess = () => process
+    const runningRequests = new Map<string, RunningChatRequest>()
+    const completionPromise = runCodexCompletion(
+      makeInput(),
+      runningRequests,
+      undefined,
+      spawnCodex
+    )
+
+    process.emitStdout(
+      `${JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'tool-a',
+          type: 'command_execution',
+          command: 'ls',
+          exit_code: 0
+        }
+      })}\n`
+    )
+    process.emitStdout(
+      `${JSON.stringify({
+        type: 'item.completed',
+        item: {
+          type: 'agent_message',
+          text: 'First response.'
+        }
+      })}\n`
+    )
+    process.emitStdout(
+      `${JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'tool-b',
+          type: 'command_execution',
+          command: 'cat package.json',
+          exit_code: 0
+        }
+      })}\n`
+    )
+    process.emitStdout(
+      `${JSON.stringify({
+        type: 'item.completed',
+        item: {
+          type: 'agent_message',
+          text: 'Second response.'
+        }
+      })}\n`
+    )
+    process.finish(0)
+
+    const result = await completionPromise
+
+    expect(result.text).toBe('First response.\n\nSecond response.')
+    expect(result.segments).toHaveLength(2)
+    expect(result.segments?.[0]).toMatchObject({
+      text: 'First response.'
+    })
+    expect(result.segments?.[0]?.toolCalls).toHaveLength(1)
+    expect(result.segments?.[0]?.toolCalls[0]).toMatchObject({
+      id: 'tool-a',
+      title: 'ls'
+    })
+    expect(result.segments?.[1]).toMatchObject({
+      text: 'Second response.'
+    })
+    expect(result.segments?.[1]?.toolCalls).toHaveLength(1)
+    expect(result.segments?.[1]?.toolCalls[0]).toMatchObject({
+      id: 'tool-b',
+      title: 'cat package.json'
+    })
+    expect(result.toolCalls).toHaveLength(2)
   })
 })

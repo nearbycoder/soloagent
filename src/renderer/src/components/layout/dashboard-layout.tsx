@@ -3,7 +3,6 @@ import {
   ChevronLeft,
   ChevronRight,
   FolderPlus,
-  LoaderCircle,
   Plus,
   Settings2,
   Trash2,
@@ -11,6 +10,7 @@ import {
   X
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Toaster, toast } from 'sonner'
 import { useOrchestration } from '@renderer/hooks/use-orchestration'
 import { useSmokeChecks } from '@renderer/hooks/use-smoke-checks'
 import { useOrchestratorStore } from '@renderer/stores/orchestrator-store'
@@ -113,6 +113,13 @@ function ActivityIndicator({ active }: { active: boolean }): React.JSX.Element |
 
 function toScopeKey(projectId?: string): string {
   return projectId || HOME_PROJECT_SCOPE
+}
+
+function isMissingGitRepositoryError(message: string): boolean {
+  const normalized = message.toLowerCase()
+  return (
+    normalized.includes('no git repository found') || normalized.includes('not a git repository')
+  )
 }
 
 function getProjectLogoKey(projectId: string): string {
@@ -266,10 +273,6 @@ export function DashboardLayout(): React.JSX.Element {
   const [gitCommitDraft, setGitCommitDraft] = useState('')
   const [gitPrTitleDraft, setGitPrTitleDraft] = useState('')
   const [gitPrBodyDraft, setGitPrBodyDraft] = useState('')
-  const [gitComposerStatus, setGitComposerStatus] = useState('')
-  const [gitComposerStatusTone, setGitComposerStatusTone] = useState<'success' | 'error' | null>(
-    null
-  )
   const [gitCommitSubmitting, setGitCommitSubmitting] = useState(false)
   const [gitPrSubmitting, setGitPrSubmitting] = useState(false)
   const [gitPushSubmitting, setGitPushSubmitting] = useState(false)
@@ -288,6 +291,7 @@ export function DashboardLayout(): React.JSX.Element {
   const projectLogoInputRef = useRef<HTMLInputElement | null>(null)
   const apiReady = Boolean(window.api)
   const projectScopeKey = toScopeKey(projectScopeId)
+  const gitComposerToastId = useMemo(() => `git-composer-${projectScopeKey}`, [projectScopeKey])
 
   const rootTerminals = useMemo(
     () => terminals.filter((terminal) => !terminal.parentTerminalId),
@@ -429,10 +433,37 @@ export function DashboardLayout(): React.JSX.Element {
       return
     }
 
-    setGitDiff(response.data)
+    setGitDiff((current) => {
+      const previousByPath = new Map((current?.files || []).map((file) => [file.path, file]))
+      const mergedFiles = response.data.files.map((file) => {
+        const previous = previousByPath.get(file.path)
+        if (!previous || !previous.patch || previous.patch.trim().length === 0) {
+          return file
+        }
+        if (file.patch && file.patch.trim().length > 0) {
+          return file
+        }
+        const isSameDiffFingerprint =
+          previous.status === file.status &&
+          previous.additions === file.additions &&
+          previous.deletions === file.deletions
+        if (!isSameDiffFingerprint) {
+          return file
+        }
+        return {
+          ...file,
+          patch: previous.patch,
+          hunks: file.hunks.length > 0 ? file.hunks : previous.hunks
+        }
+      })
+
+      return {
+        ...response.data,
+        files: mergedFiles
+      }
+    })
     setGitDiffError('')
     setGitDiffLoading(false)
-    setGitDiffPatchLoadingByPath({})
   }, [selectedProject?.rootPath])
 
   const handleGitCommit = useCallback(async (): Promise<void> => {
@@ -442,14 +473,12 @@ export function DashboardLayout(): React.JSX.Element {
 
     const cwd = selectedProject?.rootPath
     if (!cwd) {
-      setGitComposerStatusTone('error')
-      setGitComposerStatus('Select a project before committing.')
+      toast.error('Select a project before committing.')
       return
     }
 
     setGitCommitSubmitting(true)
-    setGitComposerStatusTone(null)
-    setGitComposerStatus('Creating commit...')
+    toast.loading('Creating commit...', { id: gitComposerToastId })
 
     try {
       const response = await window.api.app.gitCommit({
@@ -457,19 +486,19 @@ export function DashboardLayout(): React.JSX.Element {
         message: gitCommitDraft.trim() || undefined
       })
       if (!response.ok) {
-        setGitComposerStatusTone('error')
-        setGitComposerStatus(response.error.message || 'Commit failed.')
+        toast.error(response.error.message || 'Commit failed.', { id: gitComposerToastId })
         return
       }
 
       setGitCommitDraft('')
-      setGitComposerStatusTone('success')
-      setGitComposerStatus(`Committed ${response.data.commitHash}: ${response.data.commitMessage}`)
+      toast.success(`Committed ${response.data.commitHash}: ${response.data.commitMessage}`, {
+        id: gitComposerToastId
+      })
       await loadGitDiff()
     } finally {
       setGitCommitSubmitting(false)
     }
-  }, [gitCommitDraft, loadGitDiff, selectedProject?.rootPath])
+  }, [gitCommitDraft, gitComposerToastId, loadGitDiff, selectedProject?.rootPath])
 
   const handleGitCreatePr = useCallback(async (): Promise<void> => {
     if (!window.api) {
@@ -478,14 +507,12 @@ export function DashboardLayout(): React.JSX.Element {
 
     const cwd = selectedProject?.rootPath
     if (!cwd) {
-      setGitComposerStatusTone('error')
-      setGitComposerStatus('Select a project before creating a PR.')
+      toast.error('Select a project before creating a PR.')
       return
     }
 
     setGitPrSubmitting(true)
-    setGitComposerStatusTone(null)
-    setGitComposerStatus('Creating pull request...')
+    toast.loading('Creating pull request...', { id: gitComposerToastId })
 
     try {
       const response = await window.api.app.gitCreatePr({
@@ -494,24 +521,25 @@ export function DashboardLayout(): React.JSX.Element {
         body: gitPrBodyDraft.trim() || undefined
       })
       if (!response.ok) {
-        setGitComposerStatusTone('error')
-        setGitComposerStatus(response.error.message || 'Pull request creation failed.')
+        toast.error(response.error.message || 'Pull request creation failed.', {
+          id: gitComposerToastId
+        })
         return
       }
 
       setGitPrTitleDraft(response.data.title)
       setGitPrBodyDraft(response.data.body)
-      setGitComposerStatusTone('success')
-      setGitComposerStatus(
+      toast.success(
         response.data.url
           ? `Pull request created: ${response.data.url}`
-          : `Pull request created from ${response.data.headBranch}.`
+          : `Pull request created from ${response.data.headBranch}.`,
+        { id: gitComposerToastId }
       )
       await loadGitDiff()
     } finally {
       setGitPrSubmitting(false)
     }
-  }, [gitPrBodyDraft, gitPrTitleDraft, loadGitDiff, selectedProject?.rootPath])
+  }, [gitComposerToastId, gitPrBodyDraft, gitPrTitleDraft, loadGitDiff, selectedProject?.rootPath])
 
   const handleGitPush = useCallback(async (): Promise<void> => {
     if (!window.api) {
@@ -520,30 +548,28 @@ export function DashboardLayout(): React.JSX.Element {
 
     const cwd = selectedProject?.rootPath
     if (!cwd) {
-      setGitComposerStatusTone('error')
-      setGitComposerStatus('Select a project before pushing.')
+      toast.error('Select a project before pushing.')
       return
     }
 
     setGitPushSubmitting(true)
-    setGitComposerStatusTone(null)
-    setGitComposerStatus('Pushing main branch...')
+    toast.loading('Pushing main branch...', { id: gitComposerToastId })
 
     try {
       const response = await window.api.app.gitPush({ cwd })
       if (!response.ok) {
-        setGitComposerStatusTone('error')
-        setGitComposerStatus(response.error.message || 'Push failed.')
+        toast.error(response.error.message || 'Push failed.', { id: gitComposerToastId })
         return
       }
 
-      setGitComposerStatusTone('success')
-      setGitComposerStatus(`Pushed ${response.data.branch} to ${response.data.remote}.`)
+      toast.success(`Pushed ${response.data.branch} to ${response.data.remote}.`, {
+        id: gitComposerToastId
+      })
       await loadGitDiff()
     } finally {
       setGitPushSubmitting(false)
     }
-  }, [loadGitDiff, selectedProject?.rootPath])
+  }, [gitComposerToastId, loadGitDiff, selectedProject?.rootPath])
 
   const diffTheme = resolvedTheme === 'dark' ? 'github-dark' : 'github-light'
 
@@ -586,13 +612,6 @@ export function DashboardLayout(): React.JSX.Element {
     !gitComposerBusy &&
     Boolean(gitDiff?.clean) &&
     showPrComposer
-  const gitComposerProgressLabel = gitCommitSubmitting
-    ? 'Thinking about your commit...'
-    : gitPrSubmitting
-      ? 'Thinking about your pull request...'
-      : gitPushSubmitting
-        ? 'Pushing latest main changes...'
-        : ''
 
   const getDiffFileKey = useCallback(
     (path: string) => `${selectedProject?.id || HOME_PROJECT_SCOPE}:${path}`,
@@ -939,8 +958,6 @@ export function DashboardLayout(): React.JSX.Element {
     setGitCommitDraft('')
     setGitPrTitleDraft('')
     setGitPrBodyDraft('')
-    setGitComposerStatus('')
-    setGitComposerStatusTone(null)
     setGitCommitSubmitting(false)
     setGitPrSubmitting(false)
     setGitPushSubmitting(false)
@@ -2416,9 +2433,24 @@ export function DashboardLayout(): React.JSX.Element {
                         Choose a project from the left sidebar to view git changes.
                       </div>
                     ) : gitDiffError ? (
-                      <div className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-destructive">
-                        {gitDiffError}
-                      </div>
+                      isMissingGitRepositoryError(gitDiffError) ? (
+                        <div className="space-y-2 rounded-md border border-border/70 bg-muted/30 p-3 text-xs">
+                          <div className="font-medium text-foreground">No Git repository found</div>
+                          <div className="text-muted-foreground">
+                            Git Diff is available after this folder is initialized as a repository.
+                          </div>
+                          <div className="rounded border border-border/70 bg-background/70 px-2 py-1 font-mono text-[11px] text-foreground">
+                            git init
+                          </div>
+                          <div className="text-muted-foreground">
+                            Or open a project folder that already contains a `.git` directory.
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-destructive">
+                          {gitDiffError}
+                        </div>
+                      )
                     ) : gitDiffLoading && !gitDiff ? (
                       <div className="rounded-md border border-border/70 bg-muted/40 p-2 text-muted-foreground">
                         Loading diff...
@@ -2452,7 +2484,9 @@ export function DashboardLayout(): React.JSX.Element {
                               <div className="text-xs font-medium">Commit</div>
                               <div
                                 className={`ml-auto grid min-w-0 gap-1.5 ${
-                                  isMainGitBranch ? 'w-[13rem] max-w-full grid-cols-2' : 'w-[7rem] max-w-full grid-cols-1'
+                                  isMainGitBranch
+                                    ? 'w-[13rem] max-w-full grid-cols-2'
+                                    : 'w-[7rem] max-w-full grid-cols-1'
                                 }`}
                               >
                                 {isMainGitBranch ? (
@@ -2489,11 +2523,6 @@ export function DashboardLayout(): React.JSX.Element {
                             <div className="text-[11px] text-muted-foreground">
                               If empty, message is auto-generated.
                             </div>
-                            {isMainGitBranch ? (
-                              <div className="text-[11px] text-muted-foreground">
-                                On `main`, push committed changes directly when ready.
-                              </div>
-                            ) : null}
                           </div>
 
                           {showPrComposer ? (
@@ -2528,26 +2557,6 @@ export function DashboardLayout(): React.JSX.Element {
                               <div className="text-[11px] text-muted-foreground">
                                 Missing fields are auto-generated.
                               </div>
-                            </div>
-                          ) : null}
-
-                          {gitComposerStatus ? (
-                            <div
-                              className={`max-w-full overflow-hidden whitespace-pre-wrap break-all rounded-md border p-2 text-[11px] ${
-                                gitComposerStatusTone === 'error'
-                                  ? 'border-destructive/40 bg-destructive/10 text-destructive'
-                                  : gitComposerStatusTone === 'success'
-                                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-                                    : 'border-border/70 bg-muted/40 text-muted-foreground'
-                              }`}
-                            >
-                              {gitComposerBusy ? (
-                                <div className="flex items-center gap-1.5">
-                                  <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin" />
-                                  <span className="min-w-0 truncate">{gitComposerProgressLabel}</span>
-                                </div>
-                              ) : null}
-                              <div>{gitComposerStatus}</div>
                             </div>
                           ) : null}
                         </div>
@@ -2957,6 +2966,14 @@ export function DashboardLayout(): React.JSX.Element {
           </div>
         </div>
       ) : null}
+
+      <Toaster
+        position="top-right"
+        theme={resolvedTheme}
+        richColors
+        closeButton
+        toastOptions={{ duration: 5000 }}
+      />
     </div>
   )
 }
