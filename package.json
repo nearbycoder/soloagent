@@ -41,6 +41,7 @@
     "electron-updater": "^6.3.9",
     "ghostty-web": "^0.4.0",
     "lucide-react": "^0.575.0",
+    "motion": "^12.34.5",
     "node-pty": "^1.1.0",
     "react-markdown": "^10.1.0",
     "react-syntax-highlighter": "^16.1.1",

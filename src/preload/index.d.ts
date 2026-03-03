@@ -11,6 +11,8 @@ import type {
   ChatHistoryMessage,
   ChatHistoryReplaceInput,
   ChatHistoryScopeInput,
+  ChatResolveAttachmentInput,
+  ChatResolveAttachmentResult,
   ChatUploadAttachmentInput,
   ChatUploadAttachmentResult,
   CreateProjectInput,
@@ -109,6 +111,9 @@ type ChatApi = {
   uploadAttachment: (
     input: ChatUploadAttachmentInput
   ) => Promise<IpcResult<ChatUploadAttachmentResult>>
+  resolveAttachment: (
+    input: ChatResolveAttachmentInput
+  ) => Promise<IpcResult<ChatResolveAttachmentResult>>
   historyGet: (input: ChatHistoryScopeInput) => Promise<IpcResult<ChatHistoryMessage[]>>
   historyReplace: (input: ChatHistoryReplaceInput) => Promise<IpcResult<boolean>>
   onEvent: (callback: (event: ChatEvent) => void) => () => void

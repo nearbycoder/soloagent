@@ -201,7 +201,8 @@ export async function runCodexCompletion(
   input: ChatCompleteInput,
   runningRequests: Map<string, RunningChatRequest>,
   onToolCallUpdate?: (toolCall: ChatToolCall) => void,
-  spawnCodex: SpawnCodexProcess = defaultSpawnCodex
+  spawnCodex: SpawnCodexProcess = defaultSpawnCodex,
+  onAssistantProgress?: (text: string) => void
 ): Promise<ChatCompleteResult> {
   const existingRequest = runningRequests.get(input.requestId)
   if (existingRequest) {
@@ -278,6 +279,7 @@ export async function runCodexCompletion(
           const itemText = asString(item?.text)
           if (itemText?.trim()) {
             const text = itemText.trim()
+            onAssistantProgress?.(text)
             assistantMessages.push(text)
             messageSegments.push({
               text,

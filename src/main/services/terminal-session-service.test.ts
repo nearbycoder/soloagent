@@ -123,6 +123,18 @@ function createService(options: { writeError?: Error } = {}): {
 }
 
 describe('TerminalSessionService', () => {
+  it('numbers default terminal titles per project scope', () => {
+    const { service } = createService()
+
+    const home = service.createSession({})
+    const project = service.createSession({ projectId: 'project-1' })
+    const projectSecond = service.createSession({ projectId: 'project-1' })
+
+    expect(home.title).toBe('Terminal 1')
+    expect(project.title).toBe('Terminal 1')
+    expect(projectSecond.title).toBe('Terminal 2')
+  })
+
   it('does not persist layout when a late process exit arrives during disposeAll', () => {
     const { service, pty, settings } = createService()
     const session = service.createSession({ title: 'Shell' })

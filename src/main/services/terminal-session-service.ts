@@ -76,6 +76,10 @@ export class TerminalSessionService {
       .sort((a, b) => a.createdAt - b.createdAt)
   }
 
+  private nextScopedTerminalTitle(projectId?: string): string {
+    return `Terminal ${this.scopedSessions(projectId).length + 1}`
+  }
+
   private persistScopeLayout(projectId?: string): void {
     if (this.isDisposing) {
       return
@@ -134,7 +138,7 @@ export class TerminalSessionService {
     const cwd = input.cwd || this.ptyService.getDefaultCwd()
     const session: TerminalSession = {
       id,
-      title: seed?.title || input.title || `Terminal ${this.sessions.size + 1}`,
+      title: seed?.title || input.title || this.nextScopedTerminalTitle(input.projectId),
       cwd,
       projectId: input.projectId,
       parentTerminalId: input.parentTerminalId,

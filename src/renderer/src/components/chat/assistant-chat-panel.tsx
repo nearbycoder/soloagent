@@ -2,7 +2,7 @@ import type { ModelMessage, StreamChunk } from '@tanstack/ai'
 import type { ConnectionAdapter, UIMessage } from '@tanstack/ai-client'
 import { useChat } from '@tanstack/ai-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { Check, ChevronDown, LoaderCircle, Search, X } from 'lucide-react'
+import { Check, ChevronDown, Search, X } from 'lucide-react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism'
@@ -10,6 +10,7 @@ import remarkGfm from 'remark-gfm'
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChatHistoryMessage, ChatMessage, ChatToolCall } from '../../../../shared/ipc/types'
 import type { ChatReasoningEffort } from '../../../../shared/ipc/types'
+import { AgentChatIndicator } from '../agents-ui/agent-chat-indicator'
 import { Button } from '../ui/button'
 import {
   buildRenderableMessages,
@@ -25,6 +26,7 @@ type AssistantChatPanelProps = {
   activeSpaceId?: string
   sessions: AssistantChatSessionBinding[]
   colorMode: 'light' | 'dark'
+  accentColor?: string
   onStreamingChange?: (scopeKey: string, spaceId: string, isStreaming: boolean) => void
 }
 
@@ -41,6 +43,7 @@ type AssistantChatSessionProps = {
   spaceId: string
   projectId?: string
   colorMode: 'light' | 'dark'
+  accentColor?: string
   onStreamingChange?: (scopeKey: string, spaceId: string, isStreaming: boolean) => void
 }
 
@@ -74,6 +77,17 @@ const MAX_IMAGE_ATTACHMENTS = 4
 const MAX_IMAGE_ATTACHMENT_BYTES = 5 * 1024 * 1024
 const SUPPORTED_IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']
 const MARKDOWN_PLUGINS = [remarkGfm]
+const CHAT_INFLIGHT_STORAGE_PREFIX = 'soloagent:chat:inflight'
+const CHAT_INFLIGHT_TTL_MS = 15 * 60 * 1000
+const CHAT_RECOVERY_POLL_MS = 1250
+const CHAT_RECOVERY_TIMEOUT_MS = 2 * 60 * 1000
+const attachmentDataUrlCache = new Map<string, string>()
+const attachmentDataUrlPending = new Map<string, Promise<string>>()
+
+type InflightChatMarker = {
+  requestId: string
+  startedAt: number
+}
 
 type ToolTracePayloadItem = {
   title: string
@@ -102,7 +116,13 @@ type LiveToolRenderItem = {
   payload: ToolTracePayload
 }
 
-type ChatRenderItem = ChatMessageRenderItem | LiveToolRenderItem
+type LiveProgressRenderItem = {
+  id: string
+  kind: 'live-progress'
+  entries: string[]
+}
+
+type ChatRenderItem = ChatMessageRenderItem | LiveToolRenderItem | LiveProgressRenderItem
 type PendingImageAttachment = {
   id: string
   name: string
@@ -171,6 +191,63 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms)
   })
+}
+
+function getInflightStorageKey(scopeKey: string, spaceId: string): string {
+  return `${CHAT_INFLIGHT_STORAGE_PREFIX}:${scopeKey}:${spaceId}`
+}
+
+function parseInflightChatMarker(raw: string | null): InflightChatMarker | null {
+  if (!raw) {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<InflightChatMarker>
+    if (
+      !parsed ||
+      typeof parsed.requestId !== 'string' ||
+      parsed.requestId.trim().length === 0 ||
+      typeof parsed.startedAt !== 'number' ||
+      !Number.isFinite(parsed.startedAt)
+    ) {
+      return null
+    }
+
+    return {
+      requestId: parsed.requestId.trim(),
+      startedAt: parsed.startedAt
+    }
+  } catch {
+    return null
+  }
+}
+
+function areHistoryMessagesEqual(
+  left: ChatHistoryMessage[],
+  right: ChatHistoryMessage[]
+): boolean {
+  if (left.length !== right.length) {
+    return false
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    const leftMessage = left[index]
+    const rightMessage = right[index]
+    if (!leftMessage || !rightMessage) {
+      return false
+    }
+    if (
+      leftMessage.id !== rightMessage.id ||
+      leftMessage.role !== rightMessage.role ||
+      leftMessage.content !== rightMessage.content ||
+      leftMessage.createdAt !== rightMessage.createdAt
+    ) {
+      return false
+    }
+  }
+
+  return true
 }
 
 function getTextFromModelMessageContent(content: ModelMessage['content']): string {
@@ -419,8 +496,182 @@ function transformMarkdownUrl(url: string): string {
   return ''
 }
 
+function isFileAttachmentUrl(url: string): boolean {
+  try {
+    return new URL(url).protocol === 'file:'
+  } catch {
+    return false
+  }
+}
+
+async function resolveAttachmentDataUrl(src: string): Promise<string> {
+  const cached = attachmentDataUrlCache.get(src)
+  if (cached) {
+    return cached
+  }
+
+  const existing = attachmentDataUrlPending.get(src)
+  if (existing) {
+    return await existing
+  }
+
+  const next = (async () => {
+    if (!window.api) {
+      throw new Error('Preload API unavailable.')
+    }
+
+    const response = await window.api.chat.resolveAttachment({ url: src })
+    if (!response.ok) {
+      throw new Error(response.error.message || 'Failed to resolve image attachment.')
+    }
+
+    attachmentDataUrlCache.set(src, response.data.dataUrl)
+    return response.data.dataUrl
+  })()
+
+  attachmentDataUrlPending.set(src, next)
+  try {
+    return await next
+  } finally {
+    attachmentDataUrlPending.delete(src)
+  }
+}
+
+function MarkdownAttachmentImage({
+  src,
+  alt
+}: {
+  src: string
+  alt?: string
+}): React.JSX.Element {
+  const [resolvedSrc, setResolvedSrc] = useState<string | null>(() =>
+    isFileAttachmentUrl(src) ? attachmentDataUrlCache.get(src) || null : src
+  )
+
+  useEffect(() => {
+    let cancelled = false
+
+    if (!isFileAttachmentUrl(src)) {
+      setResolvedSrc(src)
+      return () => {
+        cancelled = true
+      }
+    }
+
+    if (attachmentDataUrlCache.has(src)) {
+      setResolvedSrc(attachmentDataUrlCache.get(src) || '')
+      return () => {
+        cancelled = true
+      }
+    }
+
+    setResolvedSrc(null)
+    void resolveAttachmentDataUrl(src)
+      .then((dataUrl) => {
+        if (!cancelled) {
+          setResolvedSrc(dataUrl)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setResolvedSrc('')
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [src])
+
+  if (resolvedSrc === null) {
+    return <span className="text-muted-foreground">{alt || 'Loading image attachment...'}</span>
+  }
+
+  if (!resolvedSrc) {
+    return <span className="text-muted-foreground">{alt || 'Image attachment unavailable.'}</span>
+  }
+
+  return (
+    <img
+      src={resolvedSrc}
+      alt={alt || 'Attachment'}
+      loading="lazy"
+      className="max-h-64 w-auto rounded-md border border-border/70 bg-background/60"
+    />
+  )
+}
+
 function isReasoningEffort(value: string): value is ChatReasoningEffort {
   return value === 'low' || value === 'medium' || value === 'high'
+}
+
+function hexToHslChannels(hexColor: string): { h: number; s: number; l: number } | null {
+  const hex = hexColor.trim().replace(/^#/, '')
+  if (!/^[0-9a-fA-F]{6}$/.test(hex)) {
+    return null
+  }
+
+  const r = Number.parseInt(hex.slice(0, 2), 16) / 255
+  const g = Number.parseInt(hex.slice(2, 4), 16) / 255
+  const b = Number.parseInt(hex.slice(4, 6), 16) / 255
+  const max = Math.max(r, g, b)
+  const min = Math.min(r, g, b)
+  const delta = max - min
+  const lightness = (max + min) / 2
+
+  if (delta === 0) {
+    return { h: 0, s: 0, l: Math.round(lightness * 100) }
+  }
+
+  const saturation = delta / (1 - Math.abs(2 * lightness - 1))
+  let hue = 0
+  if (max === r) {
+    hue = ((g - b) / delta) % 6
+  } else if (max === g) {
+    hue = (b - r) / delta + 2
+  } else {
+    hue = (r - g) / delta + 4
+  }
+
+  const normalizedHue = Math.round((hue * 60 + 360) % 360)
+  return {
+    h: normalizedHue,
+    s: Math.round(saturation * 100),
+    l: Math.round(lightness * 100)
+  }
+}
+
+function ThinkingDotCluster(): React.JSX.Element {
+  const rows = 2
+  const columns = 6
+
+  return (
+    <span className="inline-flex flex-col gap-px" aria-hidden="true">
+      {Array.from({ length: rows }).map((_, rowIndex) => (
+        <span key={`row-${rowIndex}`} className="inline-flex items-center gap-px">
+          {Array.from({ length: columns }).map((__, columnIndex) => {
+            const dotIndex = rowIndex * columns + columnIndex
+            const delay = dotIndex * 0.07
+            const tone = Math.round((dotIndex / Math.max(1, rows * columns - 1)) * 14 - 7)
+            return (
+              <AgentChatIndicator
+                key={`dot-${rowIndex}-${columnIndex}`}
+                size="xxs"
+                className="sa-thinking-dot"
+                transition={{ delay, duration: 0.1 }}
+                style={
+                  {
+                    '--sa-dot-tone': `${tone}%`,
+                    '--sa-dot-delay': `${delay}s`
+                  } as React.CSSProperties
+                }
+              />
+            )
+          })}
+        </span>
+      ))}
+    </span>
+  )
 }
 
 const MessageContent = memo(function MessageContent({
@@ -467,14 +718,11 @@ const MessageContent = memo(function MessageContent({
           )
         }
 
-        return (
-          <img
-            src={src}
-            alt={alt || 'Attachment'}
-            loading="lazy"
-            className="max-h-64 w-auto rounded-md border border-border/70 bg-background/60"
-          />
-        )
+        if (src && isFileAttachmentUrl(src)) {
+          return <MarkdownAttachmentImage src={src} alt={alt} />
+        }
+
+        return <MarkdownAttachmentImage src={src || ''} alt={alt} />
       },
       code: ({ className, children }) => {
         const rawCode = String(children).replace(/\n$/, '')
@@ -619,6 +867,34 @@ const ChatListItem = memo(function ChatListItem({
   item: ChatRenderItem
   colorMode: 'light' | 'dark'
 }): React.JSX.Element {
+  if (item.kind === 'live-progress') {
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-[88%] rounded-xl border border-border/70 bg-background/70 px-2.5 py-2 text-xs text-muted-foreground">
+          <div className="mb-1 inline-flex items-center gap-1.5">
+            <ThinkingDotCluster />
+            <span className="whitespace-nowrap font-medium">Working...</span>
+          </div>
+          <details className="group rounded-md border border-border/60 bg-muted/20">
+            <summary className="cursor-pointer list-none px-2 py-1 text-[11px] text-muted-foreground">
+              <span className="inline-flex items-center gap-1">
+                Updates ({item.entries.length})
+                <ChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" />
+              </span>
+            </summary>
+            <div className="space-y-1 border-t border-border/60 px-2 py-1.5">
+              {item.entries.map((entry, index) => (
+                <div key={`${entry}-${index}`} className="whitespace-pre-wrap break-words">
+                  {entry}
+                </div>
+              ))}
+            </div>
+          </details>
+        </div>
+      </div>
+    )
+  }
+
   if (item.kind === 'live-tools') {
     return (
       <div className="flex justify-start">
@@ -881,6 +1157,7 @@ function AssistantChatSession({
   spaceId,
   projectId,
   colorMode,
+  accentColor,
   onStreamingChange
 }: AssistantChatSessionProps): React.JSX.Element {
   const modelInputId = `chat-model-${scopeKey}-${spaceId}`
@@ -894,15 +1171,34 @@ function AssistantChatSession({
   const [isDropTargetActive, setIsDropTargetActive] = useState(false)
   const [historyReady, setHistoryReady] = useState(false)
   const [historyError, setHistoryError] = useState<string | null>(null)
+  const [isRecoveringResponse, setIsRecoveringResponse] = useState(false)
+  const [liveProgressEntries, setLiveProgressEntries] = useState<string[]>([])
   const [liveToolCalls, setLiveToolCalls] = useState<ChatToolCall[]>([])
   const [activeAssistantMessageId, setActiveAssistantMessageId] = useState<string | null>(null)
   const [activeToolMessageId, setActiveToolMessageId] = useState<string | null>(null)
   const messageViewportRef = useRef<HTMLDivElement | null>(null)
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null)
   const activeRequestIdRef = useRef<string | null>(null)
+  const suppressAbortForReloadRef = useRef(false)
+  const manualStopRequestedRef = useRef(false)
   const liveToolCallsRef = useRef<ChatToolCall[]>([])
   const shouldAutoScrollRef = useRef(true)
   const dropDepthRef = useRef(0)
+  const inflightStorageKey = useMemo(() => getInflightStorageKey(scopeKey, spaceId), [scopeKey, spaceId])
+
+  useEffect(() => {
+    suppressAbortForReloadRef.current = false
+    const markUnload = (): void => {
+      suppressAbortForReloadRef.current = true
+    }
+
+    window.addEventListener('beforeunload', markUnload)
+    window.addEventListener('pagehide', markUnload)
+    return (): void => {
+      window.removeEventListener('beforeunload', markUnload)
+      window.removeEventListener('pagehide', markUnload)
+    }
+  }, [])
 
   const connection = useMemo<ConnectionAdapter>(
     () => ({
@@ -912,12 +1208,22 @@ function AssistantChatSession({
         }
 
         const requestId = createRequestId()
+        suppressAbortForReloadRef.current = false
+        manualStopRequestedRef.current = false
+        window.sessionStorage.setItem(
+          inflightStorageKey,
+          JSON.stringify({ requestId, startedAt: Date.now() } satisfies InflightChatMarker)
+        )
         activeRequestIdRef.current = requestId
+        setLiveProgressEntries([])
         setLiveToolCalls([])
         setActiveToolMessageId(null)
         setActiveAssistantMessageId(null)
         liveToolCallsRef.current = []
         const abortRequest = (): void => {
+          if (suppressAbortForReloadRef.current && !manualStopRequestedRef.current) {
+            return
+          }
           void window.api.chat.abort({ requestId })
         }
         abortSignal?.addEventListener('abort', abortRequest, { once: true })
@@ -933,7 +1239,10 @@ function AssistantChatSession({
             model,
             reasoningEffort,
             messages: normalizedMessages,
-            cwd: projectPath
+            cwd: projectPath,
+            scopeKey,
+            spaceId,
+            projectId
           })
 
           if (!response.ok) {
@@ -974,6 +1283,7 @@ function AssistantChatSession({
             model
           }
 
+          setLiveProgressEntries([])
           setLiveToolCalls([])
           liveToolCallsRef.current = []
 
@@ -1070,8 +1380,14 @@ function AssistantChatSession({
           if (activeRequestIdRef.current === requestId) {
             activeRequestIdRef.current = null
           }
+          const inflightMarker = parseInflightChatMarker(window.sessionStorage.getItem(inflightStorageKey))
+          if (inflightMarker?.requestId === requestId) {
+            window.sessionStorage.removeItem(inflightStorageKey)
+          }
+          manualStopRequestedRef.current = false
           if (abortSignal?.aborted) {
             setActiveAssistantMessageId(null)
+            setLiveProgressEntries([])
             setLiveToolCalls([])
             liveToolCallsRef.current = []
             setActiveToolMessageId(null)
@@ -1080,7 +1396,7 @@ function AssistantChatSession({
         }
       }
     }),
-    [model, projectPath, reasoningEffort]
+    [inflightStorageKey, model, projectId, projectPath, reasoningEffort, scopeKey, spaceId]
   )
 
   const { messages, sendMessage, clear, stop, setMessages, isLoading, error } = useChat({
@@ -1122,6 +1438,16 @@ function AssistantChatSession({
 
     return false
   }, [messageItems])
+  const liveProgressItem = useMemo<LiveProgressRenderItem | null>(() => {
+    if (!isLoading || liveProgressEntries.length === 0) {
+      return null
+    }
+    return {
+      id: 'live-progress',
+      kind: 'live-progress',
+      entries: liveProgressEntries
+    }
+  }, [isLoading, liveProgressEntries])
   const liveToolItem = useMemo<LiveToolRenderItem | null>(() => {
     if (
       liveToolCalls.length === 0 ||
@@ -1137,8 +1463,18 @@ function AssistantChatSession({
       payload: buildToolTracePayload(liveToolCalls)
     }
   }, [hasPersistedToolTraceForActiveRun, hasToolTraceAfterLatestUser, isLoading, liveToolCalls])
+  const liveRuntimeItems = useMemo<ChatRenderItem[]>(() => {
+    const items: ChatRenderItem[] = []
+    if (liveToolItem) {
+      items.push(liveToolItem)
+    }
+    if (liveProgressItem) {
+      items.push(liveProgressItem)
+    }
+    return items
+  }, [liveProgressItem, liveToolItem])
   const renderItems = useMemo<ChatRenderItem[]>(() => {
-    if (!liveToolItem) {
+    if (liveRuntimeItems.length === 0) {
       return messageItems
     }
 
@@ -1163,16 +1499,21 @@ function AssistantChatSession({
       insertBeforeIndexById >= 0 ? insertBeforeIndexById : fallbackAssistantIndex
 
     if (insertBeforeIndex < 0) {
-      return [...messageItems, liveToolItem]
+      return [...messageItems, ...liveRuntimeItems]
     }
 
     return [
       ...messageItems.slice(0, insertBeforeIndex),
-      liveToolItem,
+      ...liveRuntimeItems,
       ...messageItems.slice(insertBeforeIndex)
     ]
-  }, [activeAssistantMessageId, liveToolItem, messageItems])
-  const showThinkingIndicator = isLoading && !activeAssistantMessageId && liveToolCalls.length === 0
+  }, [activeAssistantMessageId, liveRuntimeItems, messageItems])
+  const showThinkingIndicator =
+    isLoading &&
+    !activeAssistantMessageId &&
+    liveToolCalls.length === 0 &&
+    liveProgressEntries.length === 0
+  const showRecoveryIndicator = !isLoading && isRecoveringResponse
   const shouldVirtualize = shouldVirtualizeChatMessages(renderItems.length)
   const rowVirtualizer = useVirtualizer({
     count: renderItems.length,
@@ -1188,10 +1529,27 @@ function AssistantChatSession({
     }
 
     const off = window.api.chat.onEvent((event) => {
-      if (event.type !== 'tool_call') {
+      if (!activeRequestIdRef.current || event.requestId !== activeRequestIdRef.current) {
         return
       }
-      if (!activeRequestIdRef.current || event.requestId !== activeRequestIdRef.current) {
+
+      if (event.type === 'assistant_progress') {
+        const text = event.text.trim()
+        if (!text) {
+          return
+        }
+
+        setLiveProgressEntries((state) => {
+          if (state[state.length - 1] === text) {
+            return state
+          }
+          const next = [...state, text]
+          return next.length > 24 ? next.slice(next.length - 24) : next
+        })
+        return
+      }
+
+      if (event.type !== 'tool_call') {
         return
       }
 
@@ -1264,6 +1622,89 @@ function AssistantChatSession({
       return
     }
 
+    const marker = parseInflightChatMarker(window.sessionStorage.getItem(inflightStorageKey))
+    if (!marker) {
+      setIsRecoveringResponse(false)
+      return
+    }
+
+    if (Date.now() - marker.startedAt > CHAT_INFLIGHT_TTL_MS) {
+      window.sessionStorage.removeItem(inflightStorageKey)
+      setIsRecoveringResponse(false)
+      return
+    }
+
+    let cancelled = false
+    let pollInFlight = false
+    const recoveryStartedAt = Date.now()
+    setIsRecoveringResponse(true)
+
+    const pollHistory = async (): Promise<void> => {
+      if (cancelled || pollInFlight) {
+        return
+      }
+
+      const activeMarker = parseInflightChatMarker(window.sessionStorage.getItem(inflightStorageKey))
+      if (!activeMarker) {
+        setIsRecoveringResponse(false)
+        return
+      }
+
+      if (
+        Date.now() - activeMarker.startedAt > CHAT_INFLIGHT_TTL_MS ||
+        Date.now() - recoveryStartedAt > CHAT_RECOVERY_TIMEOUT_MS
+      ) {
+        window.sessionStorage.removeItem(inflightStorageKey)
+        setIsRecoveringResponse(false)
+        return
+      }
+
+      pollInFlight = true
+      try {
+        const response = await window.api.chat.historyGet({
+          scopeKey,
+          spaceId,
+          projectId
+        })
+        if (cancelled || !response.ok) {
+          return
+        }
+
+        if (!areHistoryMessagesEqual(response.data, persistedMessages)) {
+          setMessages(toUiMessages(response.data))
+          window.sessionStorage.removeItem(inflightStorageKey)
+          setIsRecoveringResponse(false)
+        }
+      } finally {
+        pollInFlight = false
+      }
+    }
+
+    const intervalId = window.setInterval(() => {
+      void pollHistory()
+    }, CHAT_RECOVERY_POLL_MS)
+    void pollHistory()
+
+    return (): void => {
+      cancelled = true
+      window.clearInterval(intervalId)
+    }
+  }, [
+    historyReady,
+    inflightStorageKey,
+    isLoading,
+    persistedMessages,
+    projectId,
+    scopeKey,
+    setMessages,
+    spaceId
+  ])
+
+  useEffect(() => {
+    if (!historyReady || isLoading) {
+      return
+    }
+
     const timeout = window.setTimeout(() => {
       void window.api.chat.historyReplace({
         scopeKey,
@@ -1309,6 +1750,7 @@ function AssistantChatSession({
     historyReady,
     isLoading,
     liveToolCalls,
+    liveProgressEntries,
     messages,
     renderItems.length,
     rowVirtualizer,
@@ -1506,9 +1948,27 @@ function AssistantChatSession({
     () => historyReady && !isLoading && (prompt.trim().length > 0 || imageAttachments.length > 0),
     [historyReady, imageAttachments.length, isLoading, prompt]
   )
+  const thinkingDotStyle = useMemo(
+    () => {
+      const base = hexToHslChannels(accentColor || '#2563eb') || { h: 221, s: 83, l: 53 }
+      return {
+        '--thinking-dot-h': `${base.h}deg`,
+        '--thinking-dot-s': `${Math.max(28, Math.min(100, base.s))}%`,
+        '--thinking-dot-l': `${Math.max(32, Math.min(68, base.l))}%`
+      } as React.CSSProperties
+    },
+    [accentColor]
+  )
+
+  const handleStop = (): void => {
+    manualStopRequestedRef.current = true
+    stop()
+  }
 
   const handleClearChat = (): void => {
     clear()
+    window.sessionStorage.removeItem(inflightStorageKey)
+    setIsRecoveringResponse(false)
     setImageAttachments([])
     setAttachmentError(null)
     clearDropOverlay()
@@ -1569,7 +2029,7 @@ function AssistantChatSession({
   }, [colorMode, historyReady, renderItems, rowVirtualizer, shouldVirtualize])
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-1.5">
+    <div className="flex h-full min-h-0 flex-col gap-1.5" style={thinkingDotStyle}>
       <div className="flex items-center gap-1.5">
         <label
           className="text-[10px] uppercase tracking-[0.08em] text-muted-foreground"
@@ -1607,7 +2067,12 @@ function AssistantChatSession({
 
         <div className="ml-auto flex items-center gap-1">
           {isLoading ? (
-            <Button size="sm" variant="secondary" className="h-6 px-2 text-[11px]" onClick={stop}>
+            <Button
+              size="sm"
+              variant="secondary"
+              className="h-6 px-2 text-[11px]"
+              onClick={handleStop}
+            >
               Stop
             </Button>
           ) : null}
@@ -1641,11 +2106,13 @@ function AssistantChatSession({
         className="relative min-h-0 flex-1 overflow-y-auto rounded-md border border-border/70 bg-muted/20 p-2"
       >
         {messageList}
-        {showThinkingIndicator ? (
+        {showThinkingIndicator || showRecoveryIndicator ? (
           <div className="mt-2 flex justify-start" aria-live="polite">
             <div className="inline-flex max-w-[88%] items-center gap-1.5 rounded-xl border border-border/70 bg-background/70 px-2.5 py-2 text-xs text-muted-foreground">
-              <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin" />
-              <span className="whitespace-nowrap">Codex is thinking...</span>
+              <ThinkingDotCluster />
+              <span className="whitespace-nowrap">
+                {showRecoveryIndicator ? 'Recovering in-flight response...' : 'Codex is thinking...'}
+              </span>
             </div>
           </div>
         ) : null}
@@ -1738,6 +2205,7 @@ export const AssistantChatPanel = memo(function AssistantChatPanel({
   activeSpaceId,
   sessions,
   colorMode,
+  accentColor,
   onStreamingChange
 }: AssistantChatPanelProps): React.JSX.Element {
   const scopeSessions = useMemo(
@@ -1772,6 +2240,7 @@ export const AssistantChatPanel = memo(function AssistantChatPanel({
               spaceId={session.spaceId}
               projectId={session.projectId}
               colorMode={colorMode}
+              accentColor={accentColor}
               onStreamingChange={onStreamingChange}
             />
           </div>

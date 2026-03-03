@@ -186,6 +186,39 @@ describe('codex-chat-service', () => {
     expect(spawnCalls[0]?.args).toContain('model_reasoning_effort="low"')
   })
 
+  it('emits assistant progress updates for each completed agent message', async () => {
+    const process = new MockCodexProcess()
+    const spawnCodex: SpawnCodexProcess = () => process
+    const runningRequests = new Map<string, RunningChatRequest>()
+    const progressUpdates: string[] = []
+    const completionPromise = runCodexCompletion(
+      makeInput(),
+      runningRequests,
+      undefined,
+      spawnCodex,
+      (text) => progressUpdates.push(text)
+    )
+
+    process.emitStdout(
+      `${JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'agent_message', text: 'Step one complete.' }
+      })}\n`
+    )
+    process.emitStdout(
+      `${JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'agent_message', text: 'Step two complete.' }
+      })}\n`
+    )
+    process.finish(0)
+
+    await expect(completionPromise).resolves.toMatchObject({
+      text: 'Step one complete.\n\nStep two complete.'
+    })
+    expect(progressUpdates).toEqual(['Step one complete.', 'Step two complete.'])
+  })
+
   it('kills an in-flight request when same request id is reused', async () => {
     const previous = new MockCodexProcess()
     const replacement = new MockCodexProcess()

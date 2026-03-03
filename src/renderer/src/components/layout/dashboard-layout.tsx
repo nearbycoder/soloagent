@@ -22,6 +22,7 @@ import type {
   TerminalSession
 } from '../../../../shared/ipc/types'
 import { AssistantChatPanel } from '../chat/assistant-chat-panel'
+import { AgentChatIndicator } from '../agents-ui/agent-chat-indicator'
 import { Button } from '../ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs'
@@ -38,6 +39,7 @@ import { WindowChrome } from './window-chrome'
 const HOME_PROJECT_SCOPE = '__home__'
 const SPACE_STORAGE_KEY = 'soloagent.spaces.v1'
 const CENTER_SPLIT_STORAGE_KEY = 'soloagent.centerSplit.topPercent.v1'
+const DEFAULT_TERMINAL_TITLE_PREFIX = 'Terminal '
 const PROJECT_LOGO_KEY_PREFIX = 'project.logo.'
 const PROJECT_ACCENT_KEY_PREFIX = 'project.accent.'
 const HOME_VISIBILITY_CONFIG_KEY = 'workspace.home.visible'
@@ -56,6 +58,7 @@ type SpaceState = {
   spacesByScope: Record<string, SpaceDefinition[]>
   activeSpaceByScope: Record<string, string | undefined>
   terminalSpaceByScope: Record<string, Record<string, string>>
+  nextTerminalNumberByScope: Record<string, Record<string, number>>
 }
 
 type ChatStreamingByScope = Record<string, Record<string, boolean>>
@@ -98,15 +101,77 @@ function NoProjectPlaceholder({
   )
 }
 
-function ActivityIndicator({ active }: { active: boolean }): React.JSX.Element | null {
+function hexToHslChannels(hexColor: string): { h: number; s: number; l: number } | null {
+  const hex = hexColor.trim().replace(/^#/, '')
+  if (!/^[0-9a-fA-F]{6}$/.test(hex)) {
+    return null
+  }
+
+  const r = Number.parseInt(hex.slice(0, 2), 16) / 255
+  const g = Number.parseInt(hex.slice(2, 4), 16) / 255
+  const b = Number.parseInt(hex.slice(4, 6), 16) / 255
+  const max = Math.max(r, g, b)
+  const min = Math.min(r, g, b)
+  const delta = max - min
+  const lightness = (max + min) / 2
+
+  if (delta === 0) {
+    return { h: 0, s: 0, l: Math.round(lightness * 100) }
+  }
+
+  const saturation = delta / (1 - Math.abs(2 * lightness - 1))
+  let hue = 0
+  if (max === r) {
+    hue = ((g - b) / delta) % 6
+  } else if (max === g) {
+    hue = (b - r) / delta + 2
+  } else {
+    hue = (r - g) / delta + 4
+  }
+
+  const normalizedHue = Math.round((hue * 60 + 360) % 360)
+  return {
+    h: normalizedHue,
+    s: Math.round(saturation * 100),
+    l: Math.round(lightness * 100)
+  }
+}
+
+function ActivityIndicator({
+  active,
+  accentColor
+}: {
+  active: boolean
+  accentColor?: string
+}): React.JSX.Element | null {
   if (!active) {
     return null
   }
 
+  const base = hexToHslChannels(accentColor || '#10b981') || { h: 160, s: 85, l: 38 }
+  const style = {
+    '--thinking-dot-h': `${base.h}deg`,
+    '--thinking-dot-s': `${Math.max(28, Math.min(100, base.s))}%`,
+    '--thinking-dot-l': `${Math.max(30, Math.min(66, base.l))}%`
+  } as React.CSSProperties
+
   return (
-    <span className="relative inline-flex h-2.5 w-2.5 shrink-0" aria-hidden="true">
-      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400/70" />
-      <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-400" />
+    <span className="inline-flex items-center gap-px" style={style} aria-hidden="true">
+      <AgentChatIndicator
+        size="xxs"
+        className="sa-thinking-dot"
+        style={{ '--sa-dot-tone': '-4%', '--sa-dot-delay': '0s' } as React.CSSProperties}
+      />
+      <AgentChatIndicator
+        size="xxs"
+        className="sa-thinking-dot"
+        style={{ '--sa-dot-tone': '0%', '--sa-dot-delay': '0.08s' } as React.CSSProperties}
+      />
+      <AgentChatIndicator
+        size="xxs"
+        className="sa-thinking-dot"
+        style={{ '--sa-dot-tone': '4%', '--sa-dot-delay': '0.16s' } as React.CSSProperties}
+      />
     </span>
   )
 }
@@ -173,12 +238,32 @@ function createSpace(index: number): SpaceDefinition {
   }
 }
 
+function getDefaultTerminalTitle(index: number): string {
+  return `${DEFAULT_TERMINAL_TITLE_PREFIX}${index}`
+}
+
+function parseDefaultTerminalTitleIndex(title: string): number | undefined {
+  const normalized = title.trim()
+  if (!normalized.startsWith(DEFAULT_TERMINAL_TITLE_PREFIX)) {
+    return undefined
+  }
+
+  const raw = normalized.slice(DEFAULT_TERMINAL_TITLE_PREFIX.length).trim()
+  if (!/^\d+$/.test(raw)) {
+    return undefined
+  }
+
+  const parsed = Number(raw)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
+}
+
 function readPersistedSpaceState(): SpaceState {
   if (typeof window === 'undefined') {
     return {
       spacesByScope: {},
       activeSpaceByScope: {},
-      terminalSpaceByScope: {}
+      terminalSpaceByScope: {},
+      nextTerminalNumberByScope: {}
     }
   }
 
@@ -188,7 +273,8 @@ function readPersistedSpaceState(): SpaceState {
       return {
         spacesByScope: {},
         activeSpaceByScope: {},
-        terminalSpaceByScope: {}
+        terminalSpaceByScope: {},
+        nextTerminalNumberByScope: {}
       }
     }
 
@@ -197,20 +283,23 @@ function readPersistedSpaceState(): SpaceState {
       return {
         spacesByScope: {},
         activeSpaceByScope: {},
-        terminalSpaceByScope: {}
+        terminalSpaceByScope: {},
+        nextTerminalNumberByScope: {}
       }
     }
 
     return {
       spacesByScope: parsed.spacesByScope || {},
       activeSpaceByScope: parsed.activeSpaceByScope || {},
-      terminalSpaceByScope: parsed.terminalSpaceByScope || {}
+      terminalSpaceByScope: parsed.terminalSpaceByScope || {},
+      nextTerminalNumberByScope: parsed.nextTerminalNumberByScope || {}
     }
   } catch {
     return {
       spacesByScope: {},
       activeSpaceByScope: {},
-      terminalSpaceByScope: {}
+      terminalSpaceByScope: {},
+      nextTerminalNumberByScope: {}
     }
   }
 }
@@ -324,11 +413,36 @@ export function DashboardLayout(): React.JSX.Element {
     spaceState.activeSpaceByScope[projectScopeKey] ||
     (spacesForCurrentScope.length > 0 ? spacesForCurrentScope[0].id : undefined)
   const terminalSpaceMap = spaceState.terminalSpaceByScope[projectScopeKey] || {}
+  const nextTerminalNumberMap = spaceState.nextTerminalNumberByScope[projectScopeKey] || {}
 
   const rootTerminalsInActiveSpace = useMemo(() => {
     if (!activeSpaceId) return []
     return rootTerminals.filter((terminal) => terminalSpaceMap[terminal.id] === activeSpaceId)
   }, [activeSpaceId, rootTerminals, terminalSpaceMap])
+
+  const getNextTerminalTitleForSpace = useCallback(
+    (spaceId: string): string => {
+      const persistedNext = nextTerminalNumberMap[spaceId]
+      if (Number.isInteger(persistedNext) && persistedNext > 0) {
+        return getDefaultTerminalTitle(persistedNext)
+      }
+
+      let maxTitleNumber = 0
+      for (const terminal of rootTerminals) {
+        if (terminalSpaceMap[terminal.id] !== spaceId) {
+          continue
+        }
+
+        const parsedIndex = parseDefaultTerminalTitleIndex(terminal.title)
+        if (parsedIndex && parsedIndex > maxTitleNumber) {
+          maxTitleNumber = parsedIndex
+        }
+      }
+
+      return getDefaultTerminalTitle(maxTitleNumber + 1)
+    },
+    [nextTerminalNumberMap, rootTerminals, terminalSpaceMap]
+  )
 
   const terminalsInActiveSpace = useMemo(() => {
     const rootIds = new Set(rootTerminalsInActiveSpace.map((terminal) => terminal.id))
@@ -404,7 +518,7 @@ export function DashboardLayout(): React.JSX.Element {
       const terminalsResponse = await window.api.terminal.list()
       if (!terminalsResponse.ok) return
       if (terminalsResponse.data.length > 0) return
-      await createTerminal({ projectId })
+      await createTerminal({ projectId, title: getDefaultTerminalTitle(1) })
     },
     [createTerminal]
   )
@@ -1601,6 +1715,7 @@ export function DashboardLayout(): React.JSX.Element {
     const previousActiveSpaceId = activeSpaceId
     const previousActiveTerminalId = activeTerminal?.id
     const nextSpace = createSpace(spacesForCurrentScope.length + 1)
+    const initialTerminalTitle = getDefaultTerminalTitle(1)
 
     setSpaceState((state) => {
       const existing = state.spacesByScope[projectScopeKey] || []
@@ -1623,7 +1738,7 @@ export function DashboardLayout(): React.JSX.Element {
     })
     setActiveTerminal(undefined)
 
-    const created = await createTerminal({ projectId: selectedProjectId })
+    const created = await createTerminal({ projectId: selectedProjectId, title: initialTerminalTitle })
     if (!created || created.parentTerminalId) {
       setActionStatus('Failed to create initial terminal for new space.')
       setSpaceState((state) => {
@@ -1902,9 +2017,11 @@ export function DashboardLayout(): React.JSX.Element {
       return undefined
     }
 
+    const nextTitle = getNextTerminalTitleForSpace(activeSpaceId)
     let created = await createTerminal({
       projectId: selectedProjectId,
-      parentTerminalId: undefined
+      parentTerminalId: undefined,
+      title: nextTitle
     })
     if (!created) {
       return created
@@ -1913,7 +2030,11 @@ export function DashboardLayout(): React.JSX.Element {
     // Guardrail: tab creation should never produce a split child.
     if (created.parentTerminalId) {
       await closeTerminal(created.id)
-      created = await createTerminal({ projectId: selectedProjectId, parentTerminalId: undefined })
+      created = await createTerminal({
+        projectId: selectedProjectId,
+        parentTerminalId: undefined,
+        title: nextTitle
+      })
       if (!created || created.parentTerminalId) {
         setActionStatus('Failed to create a new tab. Please try again.')
         return undefined
@@ -1938,6 +2059,7 @@ export function DashboardLayout(): React.JSX.Element {
     closeTerminal,
     createSpaceInCurrentScope,
     createTerminal,
+    getNextTerminalTitleForSpace,
     projectScopeKey,
     selectedProjectId,
     setActiveTerminal
@@ -2142,7 +2264,10 @@ export function DashboardLayout(): React.JSX.Element {
                               {entry.name}
                             </span>
                             <div className="flex items-center gap-1.5">
-                              <ActivityIndicator active={projectIsActive} />
+                              <ActivityIndicator
+                                active={projectIsActive}
+                                accentColor={entryAccentColor}
+                              />
                               <Button
                                 type="button"
                                 size="icon"
@@ -2286,7 +2411,10 @@ export function DashboardLayout(): React.JSX.Element {
                                           {space.name}
                                         </span>
                                         <span className="ml-2 flex items-center gap-2 text-xs text-muted-foreground">
-                                          <ActivityIndicator active={spaceIsActive} />
+                                          <ActivityIndicator
+                                            active={spaceIsActive}
+                                            accentColor={entryAccentColor}
+                                          />
                                         </span>
                                       </button>
                                       <Button
@@ -2349,6 +2477,7 @@ export function DashboardLayout(): React.JSX.Element {
                     activeSpaceId={activeSpaceId}
                     sessions={chatSessions}
                     colorMode={resolvedTheme}
+                    accentColor={selectedProjectAccentColor}
                     onStreamingChange={handleChatStreamingChange}
                   />
                 )}
@@ -2972,6 +3101,9 @@ export function DashboardLayout(): React.JSX.Element {
         theme={resolvedTheme}
         richColors
         closeButton
+        className="chrome-no-drag"
+        offset={{ top: 52, right: 16 }}
+        mobileOffset={{ top: 52, right: 12, left: 12 }}
         toastOptions={{ duration: 5000 }}
       />
     </div>

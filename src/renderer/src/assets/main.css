@@ -124,3 +124,42 @@
 .terminal-tabs-scrollbar::-webkit-scrollbar-thumb:hover {
   background: color-mix(in oklab, var(--color-foreground) 32%, transparent);
 }
+
+.sa-thinking-dot {
+  background-color: hsl(
+    var(--thinking-dot-h, 221deg)
+      var(--thinking-dot-s, 83%)
+      calc(var(--thinking-dot-l, 53%) + var(--sa-dot-tone, 0%))
+  );
+  animation: sa-thinking-dot-shade-cycle 1.8s ease-in-out infinite;
+  animation-delay: var(--sa-dot-delay, 0s);
+}
+
+@keyframes sa-thinking-dot-shade-cycle {
+  0% {
+    background-color: hsl(
+      var(--thinking-dot-h, 221deg)
+        var(--thinking-dot-s, 83%)
+        calc(var(--thinking-dot-l, 53%) - 7% + var(--sa-dot-tone, 0%))
+    );
+    opacity: 0.72;
+  }
+
+  50% {
+    background-color: hsl(
+      var(--thinking-dot-h, 221deg)
+        var(--thinking-dot-s, 83%)
+        calc(var(--thinking-dot-l, 53%) + 7% + var(--sa-dot-tone, 0%))
+    );
+    opacity: 1;
+  }
+
+  100% {
+    background-color: hsl(
+      var(--thinking-dot-h, 221deg)
+        var(--thinking-dot-s, 83%)
+        calc(var(--thinking-dot-l, 53%) - 7% + var(--sa-dot-tone, 0%))
+    );
+    opacity: 0.72;
+  }
+}

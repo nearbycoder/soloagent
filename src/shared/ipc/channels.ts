@@ -33,6 +33,7 @@ export const ipcChannels = {
     complete: 'chat:complete',
     abort: 'chat:abort',
     uploadAttachment: 'chat:attachment:upload',
+    resolveAttachment: 'chat:attachment:resolve',
     event: 'chat:event',
     historyGet: 'chat:history:get',
     historyReplace: 'chat:history:replace'

@@ -178,6 +178,9 @@ export type ChatCompleteInput = {
   reasoningEffort?: ChatReasoningEffort
   messages: ChatMessage[]
   cwd?: string
+  scopeKey?: string
+  spaceId?: string
+  projectId?: string
 }
 
 export type ChatToolCall = {
@@ -219,13 +222,29 @@ export type ChatUploadAttachmentResult = {
   bytes: number
 }
 
+export type ChatResolveAttachmentInput = {
+  url: string
+}
+
+export type ChatResolveAttachmentResult = {
+  dataUrl: string
+  bytes: number
+  mimeType: string
+}
+
 export type ChatToolCallEvent = {
   type: 'tool_call'
   requestId: string
   toolCall: ChatToolCall
 }
 
-export type ChatEvent = ChatToolCallEvent
+export type ChatAssistantProgressEvent = {
+  type: 'assistant_progress'
+  requestId: string
+  text: string
+}
+
+export type ChatEvent = ChatToolCallEvent | ChatAssistantProgressEvent
 
 export type ChatHistoryMessage = {
   id: string
