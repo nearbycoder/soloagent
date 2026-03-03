@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { ensureShellPathInProcessEnv, resolveCommandExecutable } from './shell-env'
 
-const DEFAULT_CODEX_MODEL = 'gpt-5.3-codex'
+const DEFAULT_CODEX_MODEL = 'gpt-5.1-codex-mini'
 const MAX_STAGED_PATCH_CHARS = 10_000
 const MAX_UNSTAGED_PATCH_CHARS = 10_000
 const MAX_HEAD_PATCH_CHARS = 10_000
