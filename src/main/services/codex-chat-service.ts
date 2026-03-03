@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import type { ChatCompleteInput, ChatCompleteResult, ChatToolCall } from '../../shared/ipc/types'
+import { ensureShellPathInProcessEnv, resolveCommandExecutable } from './shell-env'
 
 export type SpawnedCodexProcess = {
   stdout: NodeJS.ReadableStream
@@ -216,7 +217,9 @@ export async function runCodexCompletion(
   args.push(prompt)
 
   return await new Promise((resolve, reject) => {
-    const child = spawnCodex('codex', args, {
+    ensureShellPathInProcessEnv()
+    const codexCommand = resolveCommandExecutable('codex')
+    const child = spawnCodex(codexCommand, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: process.env
     })

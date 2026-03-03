@@ -242,6 +242,30 @@ export type GitDiffFilePatchResult = {
   patch?: string
 }
 
+export type GitCommitInput = {
+  cwd: string
+  message?: string
+}
+
+export type GitCommitResult = {
+  commitMessage: string
+  commitHash: string
+}
+
+export type GitCreatePrInput = {
+  cwd: string
+  title?: string
+  body?: string
+}
+
+export type GitCreatePrResult = {
+  title: string
+  body: string
+  url?: string
+  baseBranch?: string
+  headBranch: string
+}
+
 export type FileTreeInput = {
   cwd: string
   relativePath?: string

@@ -21,6 +21,10 @@ import type {
   RenameTerminalInput,
   DeleteAgentProfileInput,
   EnqueueAgentTaskInput,
+  GitCommitInput,
+  GitCommitResult,
+  GitCreatePrInput,
+  GitCreatePrResult,
   GitDiffFilePatchInput,
   GitDiffFilePatchResult,
   FileReadInput,
@@ -49,6 +53,8 @@ type AppApi = {
   logs: () => Promise<IpcResult<unknown>>
   gitDiff: (input: GitDiffInput) => Promise<IpcResult<GitDiffSummary>>
   gitDiffFilePatch: (input: GitDiffFilePatchInput) => Promise<IpcResult<GitDiffFilePatchResult>>
+  gitCommit: (input: GitCommitInput) => Promise<IpcResult<GitCommitResult>>
+  gitCreatePr: (input: GitCreatePrInput) => Promise<IpcResult<GitCreatePrResult>>
   fileTree: (input: FileTreeInput) => Promise<IpcResult<FileTreeEntry[]>>
   fileTreeSearch: (input: FileTreeSearchInput) => Promise<IpcResult<FileTreeEntry[]>>
   fileRead: (input: FileReadInput) => Promise<IpcResult<FileReadResult>>

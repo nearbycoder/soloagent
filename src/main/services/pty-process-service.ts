@@ -1,6 +1,8 @@
 import os from 'node:os'
+import { basename } from 'node:path'
 import type { IPty } from 'node-pty'
 import { spawn } from 'node-pty'
+import { ensureShellPathInProcessEnv } from './shell-env'
 
 type SpawnOptions = {
   cwd: string
@@ -9,8 +11,31 @@ type SpawnOptions = {
   shell?: string
 }
 
+type DisposeOptions = {
+  terminateProcesses?: boolean
+}
+
 const DEFAULT_SHELL =
   process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/zsh')
+
+function resolveShellArgs(shell: string): string[] {
+  if (process.platform === 'win32') {
+    return []
+  }
+
+  const shellName = basename(shell).toLowerCase()
+  if (
+    shellName === 'zsh' ||
+    shellName === 'bash' ||
+    shellName === 'sh' ||
+    shellName === 'ksh' ||
+    shellName === 'fish'
+  ) {
+    return ['-l']
+  }
+
+  return []
+}
 
 export class PtyProcessService {
   private readonly processes = new Map<string, IPty>()
@@ -26,7 +51,8 @@ export class PtyProcessService {
     }
 
     const shell = options.shell || DEFAULT_SHELL
-    const proc = spawn(shell, [], {
+    ensureShellPathInProcessEnv()
+    const proc = spawn(shell, resolveShellArgs(shell), {
       name: 'xterm-color',
       cols: options.cols,
       rows: options.rows,
@@ -42,6 +68,9 @@ export class PtyProcessService {
     })
 
     this.processes.set(id, proc)
+    proc.onExit(() => {
+      this.processes.delete(id)
+    })
     return proc
   }
 
@@ -71,7 +100,12 @@ export class PtyProcessService {
     }
   }
 
-  disposeAll(): void {
+  disposeAll(options: DisposeOptions = {}): void {
+    const { terminateProcesses = true } = options
+    if (!terminateProcesses) {
+      this.processes.clear()
+      return
+    }
     for (const id of this.processes.keys()) {
       this.kill(id)
     }

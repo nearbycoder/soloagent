@@ -33,6 +33,7 @@ class FakePtyProcessService {
   readonly processes = new Map<string, FakePtyProcess>()
   readonly writes: { terminalId: string; data: string }[] = []
   readonly resizes: { terminalId: string; cols: number; rows: number }[] = []
+  killCalls = 0
 
   createProcess(id: string): FakePtyProcess {
     const proc = new FakePtyProcess()
@@ -53,10 +54,15 @@ class FakePtyProcessService {
   }
 
   kill(id: string): void {
+    this.killCalls += 1
     this.processes.delete(id)
   }
 
-  disposeAll(): void {
+  disposeAll(options: { terminateProcesses?: boolean } = {}): void {
+    if (options.terminateProcesses === false) {
+      this.processes.clear()
+      return
+    }
     for (const id of [...this.processes.keys()]) {
       this.kill(id)
     }
@@ -136,6 +142,16 @@ describe('TerminalSessionService', () => {
     const { service } = createService({ writeError: new Error('database is not open') })
 
     expect(() => service.createSession({ title: 'Shell' })).not.toThrow()
+  })
+
+  it('can dispose without terminating child PTY processes', () => {
+    const { service, pty } = createService()
+    service.createSession({ title: 'Shell' })
+
+    service.disposeAll({ terminateProcesses: false })
+
+    expect(pty.killCalls).toBe(0)
+    expect(pty.processes.size).toBe(0)
   })
 
   it('rethrows non-database persistence errors', () => {

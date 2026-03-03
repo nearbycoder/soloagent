@@ -117,7 +117,7 @@ describe('codex-chat-service', () => {
     const result = await completionPromise
 
     expect(spawnCalls).toHaveLength(1)
-    expect(spawnCalls[0]?.command).toBe('codex')
+    expect(spawnCalls[0]?.command).toMatch(/(^|\/)codex(\.cmd)?$/)
     expect(spawnCalls[0]?.args).toContain('exec')
     expect(spawnCalls[0]?.args).toContain('--json')
     expect(spawnCalls[0]?.args).toContain('workspace-write')

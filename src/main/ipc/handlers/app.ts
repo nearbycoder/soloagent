@@ -7,11 +7,18 @@ import { ipcChannels } from '../../../shared/ipc/channels'
 import type {
   FileReadResult,
   FileTreeEntry,
+  GitCommitResult,
+  GitCreatePrResult,
   GitDiffFilePatchResult,
   GitDiffFileChange,
   GitDiffHunk,
   GitDiffSummary
 } from '../../../shared/ipc/types'
+import {
+  resolveGitAutofill,
+  type GitAutofillContext,
+  type GitAutofillDiffSummary
+} from '../../services/git-autofill-service'
 import { safeInvoke } from '../../utils/ipc-result'
 import type { IpcContext } from '../context'
 
@@ -22,6 +29,15 @@ const gitDiffFilePatchInputSchema = z.object({
   cwd: z.string().trim().min(1),
   path: z.string().trim().min(1),
   status: z.string().trim().optional()
+})
+const gitCommitInputSchema = z.object({
+  cwd: z.string().trim().min(1),
+  message: z.string().optional()
+})
+const gitCreatePrInputSchema = z.object({
+  cwd: z.string().trim().min(1),
+  title: z.string().optional(),
+  body: z.string().optional()
 })
 const fileTreeInputSchema = z.object({
   cwd: z.string().trim().min(1),
@@ -54,6 +70,61 @@ type MutableGitDiffFileChange = GitDiffFileChange & {
 
 type FileTreeGitStatus = NonNullable<FileTreeEntry['gitStatus']>
 
+type ChildProcessFailure = {
+  code?: string
+  status?: number
+  stdout?: string | Buffer
+  stderr?: string | Buffer
+  message?: string
+}
+
+function trimToUndefined(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined
+  }
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : undefined
+}
+
+function getChildProcessOutput(error: unknown): string {
+  const maybeError = error as ChildProcessFailure
+  const stderrText =
+    typeof maybeError?.stderr === 'string'
+      ? maybeError.stderr
+      : Buffer.isBuffer(maybeError?.stderr)
+        ? maybeError.stderr.toString('utf8')
+        : ''
+  const stdoutText =
+    typeof maybeError?.stdout === 'string'
+      ? maybeError.stdout
+      : Buffer.isBuffer(maybeError?.stdout)
+        ? maybeError.stdout.toString('utf8')
+        : ''
+  const messageText = typeof maybeError?.message === 'string' ? maybeError.message : ''
+
+  return trimToUndefined([stderrText, stdoutText, messageText].filter(Boolean).join('\n')) || ''
+}
+
+export function mapGhExecutionError(error: unknown): Error {
+  const maybeError = error as ChildProcessFailure
+  if (maybeError?.code === 'ENOENT') {
+    return new Error('Install GitHub CLI (`gh`) and authenticate with `gh auth login`.')
+  }
+
+  const output = getChildProcessOutput(error)
+  const normalized = output.toLowerCase()
+  if (
+    normalized.includes('not logged in') ||
+    normalized.includes('not logged into any hosts') ||
+    normalized.includes('authentication failed') ||
+    normalized.includes('gh auth login')
+  ) {
+    return new Error('GitHub CLI authentication required. Run `gh auth login` and retry.')
+  }
+
+  return new Error(output || 'GitHub CLI command failed.')
+}
+
 function runGit(cwd: string, args: string[]): string {
   try {
     return execFileSync('git', args, {
@@ -76,6 +147,19 @@ function runGitOptional(cwd: string, args: string[]): string {
     return runGit(cwd, args)
   } catch {
     return ''
+  }
+}
+
+function runGh(cwd: string, args: string[]): string {
+  try {
+    return execFileSync('gh', args, {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 16 * 1024 * 1024
+    })
+  } catch (error) {
+    throw mapGhExecutionError(error)
   }
 }
 
@@ -109,6 +193,97 @@ function runGitAllowingStatus(cwd: string, args: string[], allowedStatuses: numb
         ? error.message
         : 'Git command failed for the selected project.'
     throw new Error(message)
+  }
+}
+
+function gitRefExists(cwd: string, ref: string): boolean {
+  try {
+    execFileSync('git', ['show-ref', '--verify', '--quiet', ref], {
+      cwd,
+      stdio: 'ignore'
+    })
+    return true
+  } catch (error) {
+    const maybeError = error as ChildProcessFailure
+    if (maybeError?.status === 1) {
+      return false
+    }
+    const message =
+      error instanceof Error && error.message ? error.message : `Unable to verify git ref ${ref}.`
+    throw new Error(message)
+  }
+}
+
+function parseUpstreamRemote(upstreamRef: string | undefined): string | undefined {
+  const normalized = trimToUndefined(upstreamRef)
+  if (!normalized) {
+    return undefined
+  }
+  const slashIndex = normalized.indexOf('/')
+  if (slashIndex <= 0) {
+    return undefined
+  }
+  return normalized.slice(0, slashIndex)
+}
+
+export function selectPushRemote(upstreamRef: string | undefined): string {
+  return parseUpstreamRemote(upstreamRef) || 'origin'
+}
+
+function parseRemoteHeadBaseBranch(
+  remoteHeadRef: string | undefined,
+  remote: string
+): string | undefined {
+  const normalized = trimToUndefined(remoteHeadRef)
+  if (!normalized) {
+    return undefined
+  }
+
+  const prefix = `${remote}/`
+  if (!normalized.startsWith(prefix)) {
+    return undefined
+  }
+
+  const candidate = normalized.slice(prefix.length).trim()
+  return candidate.length > 0 ? candidate : undefined
+}
+
+export function resolveBaseBranchCandidate(
+  remoteHeadRef: string | undefined,
+  remote: string,
+  hasMain: boolean,
+  hasMaster: boolean
+): string | undefined {
+  const fromRemoteHead = parseRemoteHeadBaseBranch(remoteHeadRef, remote)
+  if (fromRemoteHead) {
+    return fromRemoteHead
+  }
+  if (hasMain) {
+    return 'main'
+  }
+  if (hasMaster) {
+    return 'master'
+  }
+  return undefined
+}
+
+export function parsePrUrl(rawOutput: string): string | undefined {
+  const match = rawOutput.match(/https?:\/\/[^\s]+/g)
+  if (!match || match.length === 0) {
+    return undefined
+  }
+  return trimToUndefined(match[match.length - 1])
+}
+
+export function assertCleanWorkingTree(statusOutput: string): void {
+  if (trimToUndefined(statusOutput)) {
+    throw new Error('Commit changes before creating PR.')
+  }
+}
+
+export function assertNotDetachedHead(branch: string): void {
+  if (branch.trim() === 'HEAD') {
+    throw new Error('Cannot create PR from detached HEAD.')
   }
 }
 
@@ -512,6 +687,212 @@ function buildGitDiffFilePatch(cwd: string, path: string, status?: string): GitD
   }
 }
 
+function toAutofillDiffSummary(summary: GitDiffSummary): GitAutofillDiffSummary {
+  return {
+    changedFiles: summary.changedFiles,
+    totalAdditions: summary.totalAdditions,
+    totalDeletions: summary.totalDeletions,
+    files: summary.files.map((file) => ({
+      path: file.path,
+      status: file.status,
+      additions: file.additions,
+      deletions: file.deletions
+    }))
+  }
+}
+
+function buildDiffSummaryFromNumstatOutput(numstatOutput: string): GitAutofillDiffSummary {
+  const files: GitAutofillDiffSummary['files'] = []
+  const lines = numstatOutput
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  let totalAdditions = 0
+  let totalDeletions = 0
+
+  for (const line of lines) {
+    const [rawAdditions, rawDeletions, ...pathParts] = line.split('\t')
+    const path = pathParts.join('\t').trim()
+    if (!path) {
+      continue
+    }
+
+    const additions = rawAdditions === '-' ? 0 : Number.parseInt(rawAdditions, 10) || 0
+    const deletions = rawDeletions === '-' ? 0 : Number.parseInt(rawDeletions, 10) || 0
+
+    totalAdditions += additions
+    totalDeletions += deletions
+    files.push({
+      path,
+      status: 'modified',
+      additions,
+      deletions
+    })
+  }
+
+  return {
+    changedFiles: files.length,
+    totalAdditions,
+    totalDeletions,
+    files
+  }
+}
+
+function buildWorkingTreeAutofillContext(cwd: string): GitAutofillContext {
+  const summary = buildGitDiffSummary(cwd)
+  return {
+    cwd,
+    branch: summary.branch,
+    statusOutput: runGit(cwd, ['status', '--porcelain=v1', '--branch', '--untracked-files=all']),
+    diffSummary: toAutofillDiffSummary(summary),
+    stagedPatch: runGitOptional(cwd, ['diff', '--cached', '--unified=3', '--no-color']),
+    unstagedPatch: runGitOptional(cwd, ['diff', '--unified=3', '--no-color']),
+    latestCommitMessage: runGitOptional(cwd, ['log', '-1', '--pretty=%B']).trim(),
+    latestCommitPatch: runGitOptional(cwd, [
+      'show',
+      '--format=',
+      '--unified=3',
+      '--no-color',
+      'HEAD'
+    ])
+  }
+}
+
+function buildHeadAutofillContext(cwd: string, branch: string): GitAutofillContext {
+  const headNumstat = runGitOptional(cwd, ['show', '--numstat', '--format=', 'HEAD'])
+  const diffSummary = buildDiffSummaryFromNumstatOutput(headNumstat)
+
+  return {
+    cwd,
+    branch,
+    statusOutput: runGitOptional(cwd, [
+      'status',
+      '--porcelain=v1',
+      '--branch',
+      '--untracked-files=all'
+    ]),
+    diffSummary,
+    latestCommitMessage: runGitOptional(cwd, ['log', '-1', '--pretty=%B']).trim(),
+    latestCommitPatch: runGitOptional(cwd, [
+      'show',
+      '--format=',
+      '--unified=3',
+      '--no-color',
+      'HEAD'
+    ]),
+    stagedPatch: '',
+    unstagedPatch: ''
+  }
+}
+
+function resolvePushRemoteForBranch(cwd: string): string {
+  const upstreamRef = runGitOptional(cwd, [
+    'rev-parse',
+    '--abbrev-ref',
+    '--symbolic-full-name',
+    '@{u}'
+  ])
+  return selectPushRemote(upstreamRef)
+}
+
+function resolveBaseBranchForRemote(cwd: string, remote: string): string | undefined {
+  const remoteHeadRef = runGitOptional(cwd, [
+    'symbolic-ref',
+    '--quiet',
+    '--short',
+    `refs/remotes/${remote}/HEAD`
+  ])
+
+  const hasMain =
+    gitRefExists(cwd, 'refs/heads/main') || gitRefExists(cwd, `refs/remotes/${remote}/main`)
+  const hasMaster =
+    gitRefExists(cwd, 'refs/heads/master') || gitRefExists(cwd, `refs/remotes/${remote}/master`)
+
+  return resolveBaseBranchCandidate(remoteHeadRef, remote, hasMain, hasMaster)
+}
+
+function ensureGhAuthenticated(cwd: string): void {
+  runGh(cwd, ['auth', 'status'])
+}
+
+async function executeGitCommit(
+  cwd: string,
+  message: string | undefined,
+  onWarn?: (message: string) => void
+): Promise<GitCommitResult> {
+  const statusOutput = runGit(cwd, ['status', '--porcelain=v1']).trim()
+  if (!statusOutput) {
+    throw new Error('No local changes to commit.')
+  }
+
+  const context = buildWorkingTreeAutofillContext(cwd)
+  const autofill = await resolveGitAutofill(
+    {
+      commitMessage: message,
+      prTitle: context.latestCommitMessage || 'Update project changes',
+      prBody: '## Summary\n- Not run in app.\n\n## Testing\n- Not run in app.'
+    },
+    context,
+    {
+      onWarn
+    }
+  )
+
+  runGit(cwd, ['add', '-A'])
+  runGit(cwd, ['commit', '-m', autofill.commitMessage])
+  const commitHash = runGit(cwd, ['rev-parse', '--short', 'HEAD']).trim()
+
+  return {
+    commitMessage: autofill.commitMessage,
+    commitHash
+  }
+}
+
+async function executeGitCreatePr(
+  cwd: string,
+  title: string | undefined,
+  body: string | undefined,
+  onWarn?: (message: string) => void
+): Promise<GitCreatePrResult> {
+  assertCleanWorkingTree(runGit(cwd, ['status', '--porcelain=v1']).trim())
+
+  const branch = runGit(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()
+  assertNotDetachedHead(branch)
+
+  const remote = resolvePushRemoteForBranch(cwd)
+  runGit(cwd, ['push', '-u', remote, 'HEAD'])
+
+  ensureGhAuthenticated(cwd)
+  const baseBranch = resolveBaseBranchForRemote(cwd, remote)
+  const context = buildHeadAutofillContext(cwd, branch)
+  const autofill = await resolveGitAutofill(
+    {
+      commitMessage: context.latestCommitMessage || 'chore: update project files',
+      prTitle: title,
+      prBody: body
+    },
+    context,
+    {
+      onWarn
+    }
+  )
+
+  const args = ['pr', 'create', '--title', autofill.prTitle, '--body', autofill.prBody]
+  if (baseBranch) {
+    args.push('--base', baseBranch)
+  }
+  const output = runGh(cwd, args)
+
+  return {
+    title: autofill.prTitle,
+    body: autofill.prBody,
+    url: parsePrUrl(output),
+    baseBranch,
+    headBranch: branch
+  }
+}
+
 function normalizeRelativePath(rawPath: string): string {
   const normalized = rawPath.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '').trim()
   if (!normalized || normalized === '.') {
@@ -774,6 +1155,22 @@ export function registerAppHandlers(context: IpcContext): void {
     safeInvoke(() => {
       const input = gitDiffFilePatchInputSchema.parse(rawInput)
       return buildGitDiffFilePatch(input.cwd, input.path, input.status)
+    })
+  )
+  ipcMain.handle(ipcChannels.app.gitCommit, (_, rawInput) =>
+    safeInvoke(async () => {
+      const input = gitCommitInputSchema.parse(rawInput)
+      return await executeGitCommit(input.cwd, input.message, (message) =>
+        context.logger.warn(message)
+      )
+    })
+  )
+  ipcMain.handle(ipcChannels.app.gitCreatePr, (_, rawInput) =>
+    safeInvoke(async () => {
+      const input = gitCreatePrInputSchema.parse(rawInput)
+      return await executeGitCreatePr(input.cwd, input.title, input.body, (message) =>
+        context.logger.warn(message)
+      )
     })
   )
   ipcMain.handle(ipcChannels.app.fileTree, (_, rawInput) =>

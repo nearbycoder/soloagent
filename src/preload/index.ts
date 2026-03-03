@@ -17,6 +17,8 @@ import type {
   DeleteProjectInput,
   UpdateProjectInput,
   EnqueueAgentTaskInput,
+  GitCommitInput,
+  GitCreatePrInput,
   GitDiffFilePatchInput,
   FileReadInput,
   FileTreeInput,
@@ -41,6 +43,8 @@ const appApi = {
   gitDiff: (input: GitDiffInput) => ipcRenderer.invoke(ipcChannels.app.gitDiff, input),
   gitDiffFilePatch: (input: GitDiffFilePatchInput) =>
     ipcRenderer.invoke(ipcChannels.app.gitDiffFilePatch, input),
+  gitCommit: (input: GitCommitInput) => ipcRenderer.invoke(ipcChannels.app.gitCommit, input),
+  gitCreatePr: (input: GitCreatePrInput) => ipcRenderer.invoke(ipcChannels.app.gitCreatePr, input),
   fileTree: (input: FileTreeInput) => ipcRenderer.invoke(ipcChannels.app.fileTree, input),
   fileTreeSearch: (input: FileTreeSearchInput) =>
     ipcRenderer.invoke(ipcChannels.app.fileTreeSearch, input),

@@ -13,12 +13,15 @@ import { ConfigService } from './services/config-service'
 import { LoggerService } from './services/logger'
 import { PtyProcessService } from './services/pty-process-service'
 import { ProjectService } from './services/project-service'
+import { ensureShellPathInProcessEnv } from './services/shell-env'
 import { TelemetryService } from './services/telemetry'
 import { TerminalSessionService } from './services/terminal-session-service'
 import {
   applyWindowBackgroundToAllWindows,
   resolveWindowBackgroundColor
 } from './utils/window-theme'
+
+ensureShellPathInProcessEnv()
 
 const logger = new LoggerService()
 const telemetry = new TelemetryService()
@@ -44,7 +47,8 @@ function shutdownMainServices(): void {
   }
 
   hasShutdownServices = true
-  terminalService.disposeAll()
+  // Avoid native PTY kill calls during app teardown; child processes terminate as the app exits.
+  terminalService.disposeAll({ terminateProcesses: false })
   logger.info('Disposed terminal sessions')
   sqlite.close()
   logger.info('SQLite connection closed')
@@ -200,7 +204,5 @@ app.on('before-quit', () => {
 })
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit()
-  }
+  app.quit()
 })

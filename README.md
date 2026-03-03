@@ -1,8 +1,22 @@
 # SoloAgent
 
+![SoloAgent Logo](./logo.png)
+
 SoloAgent is a desktop app (Electron + React + TypeScript) for running coding workflows with per-project workspaces, per-space chat context, and live git visibility.
 
 This README describes what the project currently is and how it is wired today.
+
+## What's New in 0.1.0
+
+- New app branding/logo wired into the project and packaging assets.
+- Git Diff now includes an inline `Commit & PR Composer`:
+  - Commit all changes with a user message, or auto-generate one when blank.
+  - Create PRs with user-provided title/body, or auto-generate missing fields.
+  - Preserves user drafts during diff polling and shows inline action status.
+- PR creation is integrated with GitHub CLI (`gh`) including remote push + base branch detection.
+- Codex process launching is more resilient in packaged builds by resolving executable paths from hydrated shell PATH.
+- Terminal shell startup now uses login-shell semantics (`-l`) so tools from shell config (for example `pyenv`, `zoxide`) are available.
+- App shutdown handling was hardened to improve close behavior and avoid PTY-related teardown crashes.
 
 ## Previews
 
@@ -61,6 +75,11 @@ SoloAgent is a single dashboard app with an adaptive layout:
   - Per-file patch loading on demand for faster initial diff load.
   - Untracked files can be opened in inline/full diff views.
   - Full-file diff modal with keyboard navigation.
+  - Inline `Commit & PR Composer`:
+    - Commit all changes (`git add -A`) with user-provided or auto-generated commit message.
+    - Create PR via `gh pr create` with user-provided or auto-generated title/body.
+    - Requires clean working tree for PR creation and auto-pushes current branch before PR.
+    - Inline success/error/loading status feedback in the Git Diff panel.
 - File Tree insight
   - Tabbed file browser in the right panel.
   - Expand/collapse directory tree with manual refresh.
@@ -117,6 +136,7 @@ SoloAgent is a single dashboard app with an adaptive layout:
 - Node.js 22+ (this project uses `node:sqlite`).
 - npm (scripts are defined with npm).
 - Git installed (for git diff panel).
+- GitHub CLI (`gh`) installed and authenticated (for PR creation from Git Diff panel).
 - `codex` CLI installed and authenticated (for chat completions/tool calls).
 
 ## Getting Started

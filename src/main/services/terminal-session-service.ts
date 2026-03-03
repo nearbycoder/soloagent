@@ -24,6 +24,10 @@ type PersistedTerminalLayoutItem = {
   createdAt: number
 }
 
+type DisposeOptions = {
+  terminateProcesses?: boolean
+}
+
 function isDatabaseNotOpenError(error: unknown): boolean {
   return error instanceof Error && /database is not open/i.test(error.message)
 }
@@ -349,13 +353,13 @@ export class TerminalSessionService {
     return [...this.sessions.values()].filter((s) => s.status === 'running').length
   }
 
-  disposeAll(): void {
+  disposeAll(options: DisposeOptions = {}): void {
     this.isDisposing = true
     for (const session of this.sessions.values()) {
       session.status = 'stopped'
     }
     this.sessions.clear()
-    this.ptyService.disposeAll()
+    this.ptyService.disposeAll(options)
     this.telemetry.setActiveTerminals(0)
   }
 }

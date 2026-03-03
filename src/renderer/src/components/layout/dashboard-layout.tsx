@@ -262,6 +262,15 @@ export function DashboardLayout(): React.JSX.Element {
   const [gitDiff, setGitDiff] = useState<GitDiffSummary | null>(null)
   const [gitDiffLoading, setGitDiffLoading] = useState(false)
   const [gitDiffError, setGitDiffError] = useState('')
+  const [gitCommitDraft, setGitCommitDraft] = useState('')
+  const [gitPrTitleDraft, setGitPrTitleDraft] = useState('')
+  const [gitPrBodyDraft, setGitPrBodyDraft] = useState('')
+  const [gitComposerStatus, setGitComposerStatus] = useState('')
+  const [gitComposerStatusTone, setGitComposerStatusTone] = useState<'success' | 'error' | null>(
+    null
+  )
+  const [gitCommitSubmitting, setGitCommitSubmitting] = useState(false)
+  const [gitPrSubmitting, setGitPrSubmitting] = useState(false)
   const [expandedGitDiffFiles, setExpandedGitDiffFiles] = useState<Record<string, boolean>>({})
   const [gitDiffPatchLoadingByPath, setGitDiffPatchLoadingByPath] = useState<
     Record<string, boolean>
@@ -424,6 +433,84 @@ export function DashboardLayout(): React.JSX.Element {
     setGitDiffPatchLoadingByPath({})
   }, [selectedProject?.rootPath])
 
+  const handleGitCommit = useCallback(async (): Promise<void> => {
+    if (!window.api) {
+      return
+    }
+
+    const cwd = selectedProject?.rootPath
+    if (!cwd) {
+      setGitComposerStatusTone('error')
+      setGitComposerStatus('Select a project before committing.')
+      return
+    }
+
+    setGitCommitSubmitting(true)
+    setGitComposerStatusTone(null)
+    setGitComposerStatus('Creating commit...')
+
+    try {
+      const response = await window.api.app.gitCommit({
+        cwd,
+        message: gitCommitDraft.trim() || undefined
+      })
+      if (!response.ok) {
+        setGitComposerStatusTone('error')
+        setGitComposerStatus(response.error.message || 'Commit failed.')
+        return
+      }
+
+      setGitCommitDraft('')
+      setGitComposerStatusTone('success')
+      setGitComposerStatus(`Committed ${response.data.commitHash}: ${response.data.commitMessage}`)
+      await loadGitDiff()
+    } finally {
+      setGitCommitSubmitting(false)
+    }
+  }, [gitCommitDraft, loadGitDiff, selectedProject?.rootPath])
+
+  const handleGitCreatePr = useCallback(async (): Promise<void> => {
+    if (!window.api) {
+      return
+    }
+
+    const cwd = selectedProject?.rootPath
+    if (!cwd) {
+      setGitComposerStatusTone('error')
+      setGitComposerStatus('Select a project before creating a PR.')
+      return
+    }
+
+    setGitPrSubmitting(true)
+    setGitComposerStatusTone(null)
+    setGitComposerStatus('Creating pull request...')
+
+    try {
+      const response = await window.api.app.gitCreatePr({
+        cwd,
+        title: gitPrTitleDraft.trim() || undefined,
+        body: gitPrBodyDraft.trim() || undefined
+      })
+      if (!response.ok) {
+        setGitComposerStatusTone('error')
+        setGitComposerStatus(response.error.message || 'Pull request creation failed.')
+        return
+      }
+
+      setGitPrTitleDraft(response.data.title)
+      setGitPrBodyDraft(response.data.body)
+      setGitComposerStatusTone('success')
+      setGitComposerStatus(
+        response.data.url
+          ? `Pull request created: ${response.data.url}`
+          : `Pull request created from ${response.data.headBranch}.`
+      )
+      await loadGitDiff()
+    } finally {
+      setGitPrSubmitting(false)
+    }
+  }, [gitPrBodyDraft, gitPrTitleDraft, loadGitDiff, selectedProject?.rootPath])
+
   const diffTheme = resolvedTheme === 'dark' ? 'github-dark' : 'github-light'
 
   const patchDiffOptions = useMemo(
@@ -450,6 +537,10 @@ export function DashboardLayout(): React.JSX.Element {
       ? gitDiffFiles[gitDiffModalFileIndex]
       : undefined
   const hasMultipleDiffFiles = gitDiffFiles.length > 1
+  const gitComposerBusy = gitCommitSubmitting || gitPrSubmitting
+  const canCommitInComposer = Boolean(selectedProject?.rootPath) && !gitComposerBusy
+  const canCreatePrInComposer =
+    Boolean(selectedProject?.rootPath) && !gitComposerBusy && Boolean(gitDiff?.clean)
 
   const getDiffFileKey = useCallback(
     (path: string) => `${selectedProject?.id || HOME_PROJECT_SCOPE}:${path}`,
@@ -791,6 +882,16 @@ export function DashboardLayout(): React.JSX.Element {
       window.removeEventListener('keydown', onKeyDown)
     }
   }, [closeGitDiffModal, gitDiffModalOpen, showNextDiffFile, showPreviousDiffFile])
+
+  useEffect(() => {
+    setGitCommitDraft('')
+    setGitPrTitleDraft('')
+    setGitPrBodyDraft('')
+    setGitComposerStatus('')
+    setGitComposerStatusTone(null)
+    setGitCommitSubmitting(false)
+    setGitPrSubmitting(false)
+  }, [projectScopeKey])
 
   useEffect(() => {
     if (!selectedProject?.rootPath || rightCollapsed || rightSidebarTab !== 'git-diff') {
@@ -2287,6 +2388,84 @@ export function DashboardLayout(): React.JSX.Element {
                             {'  '}
                             <span className="text-red-500">-{gitDiff.totalDeletions}</span>
                           </div>
+                        </div>
+                        <div className="space-y-2 rounded-md border border-border/70 p-2">
+                          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                            Commit & PR Composer
+                          </div>
+
+                          <div className="space-y-1.5 rounded-md border border-border/70 p-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-xs font-medium">Commit</div>
+                              <Button
+                                type="button"
+                                size="sm"
+                                className="h-7"
+                                onClick={() => void handleGitCommit()}
+                                disabled={!canCommitInComposer || Boolean(gitDiff.clean)}
+                              >
+                                {gitCommitSubmitting ? 'Committing...' : 'Commit'}
+                              </Button>
+                            </div>
+                            <textarea
+                              value={gitCommitDraft}
+                              onChange={(event) => setGitCommitDraft(event.target.value)}
+                              placeholder="feat(scope): concise summary"
+                              disabled={gitComposerBusy}
+                              rows={2}
+                              className="w-full resize-y rounded-md border border-input bg-background px-2 py-1.5 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-60"
+                            />
+                            <div className="text-[11px] text-muted-foreground">
+                              If empty, message is auto-generated.
+                            </div>
+                          </div>
+
+                          <div className="space-y-1.5 rounded-md border border-border/70 p-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-xs font-medium">Pull Request</div>
+                              <Button
+                                type="button"
+                                size="sm"
+                                className="h-7"
+                                onClick={() => void handleGitCreatePr()}
+                                disabled={!canCreatePrInComposer}
+                              >
+                                {gitPrSubmitting ? 'Creating...' : 'Create PR'}
+                              </Button>
+                            </div>
+                            <input
+                              value={gitPrTitleDraft}
+                              onChange={(event) => setGitPrTitleDraft(event.target.value)}
+                              placeholder="PR title"
+                              disabled={gitComposerBusy}
+                              className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-60"
+                            />
+                            <textarea
+                              value={gitPrBodyDraft}
+                              onChange={(event) => setGitPrBodyDraft(event.target.value)}
+                              placeholder="PR description"
+                              disabled={gitComposerBusy}
+                              rows={5}
+                              className="w-full resize-y rounded-md border border-input bg-background px-2 py-1.5 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-60"
+                            />
+                            <div className="text-[11px] text-muted-foreground">
+                              Missing fields are auto-generated.
+                            </div>
+                          </div>
+
+                          {gitComposerStatus ? (
+                            <div
+                              className={`rounded-md border p-2 text-[11px] ${
+                                gitComposerStatusTone === 'error'
+                                  ? 'border-destructive/40 bg-destructive/10 text-destructive'
+                                  : gitComposerStatusTone === 'success'
+                                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                                    : 'border-border/70 bg-muted/40 text-muted-foreground'
+                              }`}
+                            >
+                              {gitComposerStatus}
+                            </div>
+                          ) : null}
                         </div>
 
                         {gitDiff.clean ? (
