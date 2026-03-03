@@ -14,6 +14,7 @@ vi.mock('electron', () => ({
 import {
   assertCleanWorkingTree,
   assertHeadDiffersFromBaseBranch,
+  assertMainBranch,
   assertNotDetachedHead,
   mapGhExecutionError,
   parsePrUrl,
@@ -53,6 +54,10 @@ describe('app handler git workflow helpers', () => {
     expect(() => assertHeadDiffersFromBaseBranch('feature/test', 'main')).not.toThrow()
     expect(() => assertHeadDiffersFromBaseBranch('main', 'main')).toThrow(
       'Switch to a feature branch before creating a PR.'
+    )
+    expect(() => assertMainBranch('main')).not.toThrow()
+    expect(() => assertMainBranch('feature/test')).toThrow(
+      'Push to main is only available when you are on the main branch.'
     )
   })
 

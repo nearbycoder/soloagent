@@ -271,6 +271,7 @@ export function DashboardLayout(): React.JSX.Element {
   )
   const [gitCommitSubmitting, setGitCommitSubmitting] = useState(false)
   const [gitPrSubmitting, setGitPrSubmitting] = useState(false)
+  const [gitPushSubmitting, setGitPushSubmitting] = useState(false)
   const [expandedGitDiffFiles, setExpandedGitDiffFiles] = useState<Record<string, boolean>>({})
   const [gitDiffPatchLoadingByPath, setGitDiffPatchLoadingByPath] = useState<
     Record<string, boolean>
@@ -511,6 +512,38 @@ export function DashboardLayout(): React.JSX.Element {
     }
   }, [gitPrBodyDraft, gitPrTitleDraft, loadGitDiff, selectedProject?.rootPath])
 
+  const handleGitPush = useCallback(async (): Promise<void> => {
+    if (!window.api) {
+      return
+    }
+
+    const cwd = selectedProject?.rootPath
+    if (!cwd) {
+      setGitComposerStatusTone('error')
+      setGitComposerStatus('Select a project before pushing.')
+      return
+    }
+
+    setGitPushSubmitting(true)
+    setGitComposerStatusTone(null)
+    setGitComposerStatus('Pushing main branch...')
+
+    try {
+      const response = await window.api.app.gitPush({ cwd })
+      if (!response.ok) {
+        setGitComposerStatusTone('error')
+        setGitComposerStatus(response.error.message || 'Push failed.')
+        return
+      }
+
+      setGitComposerStatusTone('success')
+      setGitComposerStatus(`Pushed ${response.data.branch} to ${response.data.remote}.`)
+      await loadGitDiff()
+    } finally {
+      setGitPushSubmitting(false)
+    }
+  }, [loadGitDiff, selectedProject?.rootPath])
+
   const diffTheme = resolvedTheme === 'dark' ? 'github-dark' : 'github-light'
 
   const patchDiffOptions = useMemo(
@@ -537,10 +570,16 @@ export function DashboardLayout(): React.JSX.Element {
       ? gitDiffFiles[gitDiffModalFileIndex]
       : undefined
   const hasMultipleDiffFiles = gitDiffFiles.length > 1
-  const gitComposerBusy = gitCommitSubmitting || gitPrSubmitting
+  const gitComposerBusy = gitCommitSubmitting || gitPrSubmitting || gitPushSubmitting
   const canCommitInComposer = Boolean(selectedProject?.rootPath) && !gitComposerBusy
   const isMainGitBranch = gitDiff?.branch === 'main'
   const showPrComposer = !isMainGitBranch
+  const canPushMainInComposer =
+    Boolean(selectedProject?.rootPath) &&
+    !gitComposerBusy &&
+    isMainGitBranch &&
+    Boolean(gitDiff?.clean) &&
+    (gitDiff?.ahead ?? 0) > 0
   const canCreatePrInComposer =
     Boolean(selectedProject?.rootPath) &&
     !gitComposerBusy &&
@@ -896,6 +935,7 @@ export function DashboardLayout(): React.JSX.Element {
     setGitComposerStatusTone(null)
     setGitCommitSubmitting(false)
     setGitPrSubmitting(false)
+    setGitPushSubmitting(false)
   }, [projectScopeKey])
 
   useEffect(() => {
@@ -2402,15 +2442,29 @@ export function DashboardLayout(): React.JSX.Element {
                           <div className="space-y-1.5 rounded-md border border-border/70 p-2">
                             <div className="flex items-center justify-between gap-2">
                               <div className="text-xs font-medium">Commit</div>
-                              <Button
-                                type="button"
-                                size="sm"
-                                className="h-7"
-                                onClick={() => void handleGitCommit()}
-                                disabled={!canCommitInComposer || Boolean(gitDiff.clean)}
-                              >
-                                {gitCommitSubmitting ? 'Committing...' : 'Commit'}
-                              </Button>
+                              <div className="flex items-center gap-1.5">
+                                {isMainGitBranch ? (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="secondary"
+                                    className="h-7"
+                                    onClick={() => void handleGitPush()}
+                                    disabled={!canPushMainInComposer}
+                                  >
+                                    {gitPushSubmitting ? 'Pushing...' : 'Push to Main'}
+                                  </Button>
+                                ) : null}
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  className="h-7"
+                                  onClick={() => void handleGitCommit()}
+                                  disabled={!canCommitInComposer || Boolean(gitDiff.clean)}
+                                >
+                                  {gitCommitSubmitting ? 'Committing...' : 'Commit'}
+                                </Button>
+                              </div>
                             </div>
                             <textarea
                               value={gitCommitDraft}
@@ -2423,6 +2477,11 @@ export function DashboardLayout(): React.JSX.Element {
                             <div className="text-[11px] text-muted-foreground">
                               If empty, message is auto-generated.
                             </div>
+                            {isMainGitBranch ? (
+                              <div className="text-[11px] text-muted-foreground">
+                                On `main`, push committed changes directly when ready.
+                              </div>
+                            ) : null}
                           </div>
 
                           {showPrComposer ? (

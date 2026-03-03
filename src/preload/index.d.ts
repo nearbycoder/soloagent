@@ -25,6 +25,8 @@ import type {
   GitCommitResult,
   GitCreatePrInput,
   GitCreatePrResult,
+  GitPushInput,
+  GitPushResult,
   GitDiffFilePatchInput,
   GitDiffFilePatchResult,
   FileReadInput,
@@ -55,6 +57,7 @@ type AppApi = {
   gitDiffFilePatch: (input: GitDiffFilePatchInput) => Promise<IpcResult<GitDiffFilePatchResult>>
   gitCommit: (input: GitCommitInput) => Promise<IpcResult<GitCommitResult>>
   gitCreatePr: (input: GitCreatePrInput) => Promise<IpcResult<GitCreatePrResult>>
+  gitPush: (input: GitPushInput) => Promise<IpcResult<GitPushResult>>
   fileTree: (input: FileTreeInput) => Promise<IpcResult<FileTreeEntry[]>>
   fileTreeSearch: (input: FileTreeSearchInput) => Promise<IpcResult<FileTreeEntry[]>>
   fileRead: (input: FileReadInput) => Promise<IpcResult<FileReadResult>>

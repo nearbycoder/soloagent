@@ -49,6 +49,7 @@ export const ipcChannels = {
     gitDiffFilePatch: 'app:git:diff-file-patch',
     gitCommit: 'app:git:commit',
     gitCreatePr: 'app:git:create-pr',
+    gitPush: 'app:git:push',
     fileTree: 'app:file-tree',
     fileTreeSearch: 'app:file-tree:search',
     fileRead: 'app:file-read',

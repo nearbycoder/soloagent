@@ -9,6 +9,7 @@ import type {
   FileTreeEntry,
   GitCommitResult,
   GitCreatePrResult,
+  GitPushResult,
   GitDiffFilePatchResult,
   GitDiffFileChange,
   GitDiffHunk,
@@ -38,6 +39,9 @@ const gitCreatePrInputSchema = z.object({
   cwd: z.string().trim().min(1),
   title: z.string().optional(),
   body: z.string().optional()
+})
+const gitPushInputSchema = z.object({
+  cwd: z.string().trim().min(1)
 })
 const fileTreeInputSchema = z.object({
   cwd: z.string().trim().min(1),
@@ -339,6 +343,12 @@ export function assertHeadDiffersFromBaseBranch(headBranch: string, baseBranch?:
     throw new Error(
       `Current branch "${headBranch}" matches base "${baseBranch}". Switch to a feature branch before creating a PR.`
     )
+  }
+}
+
+export function assertMainBranch(branch: string): void {
+  if (branch.trim() !== 'main') {
+    throw new Error('Push to main is only available when you are on the main branch.')
   }
 }
 
@@ -1041,6 +1051,25 @@ async function executeGitCreatePr(
   }
 }
 
+async function executeGitPush(cwd: string): Promise<GitPushResult> {
+  const statusOutput = (await runGitAsync(cwd, ['status', '--porcelain=v1'])).trim()
+  if (trimToUndefined(statusOutput)) {
+    throw new Error('Commit changes before pushing to main.')
+  }
+
+  const branch = (await runGitAsync(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
+  assertNotDetachedHead(branch)
+  assertMainBranch(branch)
+
+  const remote = await resolvePushRemoteForBranch(cwd)
+  await runGitAsync(cwd, ['push', '-u', remote, 'HEAD'])
+
+  return {
+    remote,
+    branch
+  }
+}
+
 function normalizeRelativePath(rawPath: string): string {
   const normalized = rawPath.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '').trim()
   if (!normalized || normalized === '.') {
@@ -1319,6 +1348,12 @@ export function registerAppHandlers(context: IpcContext): void {
       return await executeGitCreatePr(input.cwd, input.title, input.body, (message) =>
         context.logger.warn(message)
       )
+    })
+  )
+  ipcMain.handle(ipcChannels.app.gitPush, (_, rawInput) =>
+    safeInvoke(async () => {
+      const input = gitPushInputSchema.parse(rawInput)
+      return await executeGitPush(input.cwd)
     })
   )
   ipcMain.handle(ipcChannels.app.fileTree, (_, rawInput) =>

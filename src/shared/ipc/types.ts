@@ -266,6 +266,15 @@ export type GitCreatePrResult = {
   headBranch: string
 }
 
+export type GitPushInput = {
+  cwd: string
+}
+
+export type GitPushResult = {
+  remote: string
+  branch: string
+}
+
 export type FileTreeInput = {
   cwd: string
   relativePath?: string
