@@ -1,6 +1,6 @@
 const FALLBACK_DEVELOPER_PLACEHOLDER_QUOTE = 'Works on my machine is a deployment strategy.'
 
-export const DEVELOPER_PLACEHOLDER_QUOTES = [
+export const DEVELOPER_PLACEHOLDER_QUOTES: readonly string[] = [
   'Works on my machine is a deployment strategy.',
   'I fixed a bug by deleting the feature.',
   'There is no place like 127.0.0.1.',
@@ -101,7 +101,7 @@ export const DEVELOPER_PLACEHOLDER_QUOTES = [
   'We will scale when optimism runs out.',
   'I wrote a quick query and met the whole database.',
   'Done means deployed, monitored, and still calm.'
-] as const
+]
 
 export function pickRandomDeveloperPlaceholderQuote(): string {
   if (DEVELOPER_PLACEHOLDER_QUOTES.length === 0) {
